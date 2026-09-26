@@ -1,0 +1,46 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: linguaflow
+      POSTGRES_PASSWORD: linguaflow
+      POSTGRES_DB: linguaflow
+    ports:
+      - "5432:5432"
+    volumes:
+      - linguaflow_pg:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+    env_file: .env
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    ports:
+      - "3000:3000"
+    volumes:
+      - linguaflow_recordings:/data/recordings
+
+  migration:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+    env_file: .env
+    depends_on:
+      - postgres
+    command: ["pnpm", "--filter", "@linguaflow/api", "db:migrate"]
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "8080:80"
+
+volumes:
+  linguaflow_pg:
+  linguaflow_recordings:

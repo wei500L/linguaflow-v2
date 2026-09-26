@@ -1,0 +1,57 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: linguaflow
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: linguaflow
+    volumes:
+      - linguaflow_pg:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U linguaflow -d linguaflow"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+    restart: unless-stopped
+
+  migration:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+    env_file: .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["pnpm", "--filter", "@linguaflow/api", "db:migrate"]
+    restart: "no"
+
+  api:
+    build:
+      context: .
+      dockerfile: infra/api.Dockerfile
+    env_file: .env
+    depends_on:
+      migration:
+        condition: service_completed_successfully
+    expose:
+      - "3000"
+    environment:
+      PDF_FONT_PATH: /usr/share/fonts/linguaflow/NotoSansCJKsc-Regular.otf
+    volumes:
+      - linguaflow_recordings:/data/recordings
+      - ./fonts/NotoSansCJKsc-Regular.otf:/usr/share/fonts/linguaflow/NotoSansCJKsc-Regular.otf:ro
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: infra/web.Dockerfile
+    depends_on:
+      - api
+    ports:
+      - "127.0.0.1:18081:80"
+    restart: unless-stopped
+
+volumes:
+  linguaflow_pg:
+  linguaflow_recordings:

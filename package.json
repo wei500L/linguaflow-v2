@@ -1,0 +1,17 @@
+{
+  "name": "linguaflow",
+  "private": true,
+  "packageManager": "pnpm@9.15.4",
+  "scripts": {
+    "dev": "pnpm --parallel --filter @linguaflow/api --filter @linguaflow/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "db:generate": "pnpm --filter @linguaflow/api db:generate",
+    "db:migrate": "pnpm --filter @linguaflow/api db:migrate",
+    "test": "pnpm --filter @linguaflow/api test"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "typescript": "^5.7.2"
+  }
+}

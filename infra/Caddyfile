@@ -1,0 +1,7 @@
+{
+	email admin@ru.qsfw.eu.cc
+}
+
+ru.qsfw.eu.cc {
+	reverse_proxy web:80
+}
