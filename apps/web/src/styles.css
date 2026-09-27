@@ -19,6 +19,8 @@
 .subtitle-segment{flex:none;max-width:960px;margin:0 auto 0;padding:3px 2px 7px;border:0;border-radius:0;background:transparent;box-shadow:none;animation:none}
 .subtitle-segment.current{border:0;box-shadow:none}
 .jump-latest{position:absolute;left:50%;bottom:10px;transform:translateX(-50%);border:0;border-radius:999px;background:#126e64;color:white;padding:8px 14px;font-size:12px;font-weight:700;box-shadow:0 8px 18px #126e6430}
+.earlier-captions{align-self:center;margin:4px auto 8px;border:0;background:transparent;color:#126e64;font-size:12px;font-weight:700}
+.projection-page .earlier-captions{color:#d7c4a3}
 .source-line{font-size:13px;line-height:1.35}
 .translation-line{font-size:17px;line-height:1.3;margin-top:2px}
 .current .source-line{font-size:13px}

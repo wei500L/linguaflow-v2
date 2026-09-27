@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { foldCaptionTurns, type TranscriptToken } from '@linguaflow/shared';
+import { useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, type TranscriptToken } from '@linguaflow/shared';
 import { apiOrigin } from './lib/api';
 import { tr, useLang } from './lib/i18n';
 import { LanguageToggle } from './language-toggle';
@@ -57,6 +57,11 @@ export function LivePage({ token }: { token: string }) {
   const stackRef = useRef<HTMLDivElement>(null);
   const followLatest = useRef(true);
   const scrolling = useRef(false);
+  const captionLimitRef = useRef(80);
+  const windowEndRef = useRef(0);
+  const scrollAnchor = useRef(0);
+  const [captionLimit, setCaptionLimit] = useState(80);
+  const [windowEnd, setWindowEnd] = useState(0);
 
   useEffect(() => {
     if (viewChosen.current || meta?.mode !== 'one_way') return;
@@ -70,8 +75,16 @@ export function LivePage({ token }: { token: string }) {
     let ignoreClose = false;
     let failures = 0;
     let seenMeta = false;
-    const finals: TranscriptToken[] = [];
-    const paint = (interim: TranscriptToken[] = []) => { if (alive) setSegments(foldCaptionTurns(finals, interim)); };
+    const fold = createCaptionFold();
+    const paint = (interim: TranscriptToken[] = [], pinToEnd = followLatest.current) => {
+      if (!alive) return;
+      const next = projectCaptionTurns(fold, interim);
+      if (pinToEnd) {
+        windowEndRef.current = next.length;
+        setWindowEnd(next.length);
+      }
+      setSegments(next);
+    };
     let dead = false;
     const expire = () => {
       if (!alive || dead) return;
@@ -132,17 +145,22 @@ export function LivePage({ token }: { token: string }) {
           try { data = JSON.parse(String(event.data)); }
           catch { return; }
           if (data.type === 'snapshot') {
-            finals.splice(0, finals.length, ...(data.tokens ?? []).filter((item) => item.text === '<end>' || item.is_final));
+            fold.committed = [];
+            fold.open = null;
+            ingestCaptionTokens(fold, (data.tokens ?? []).filter((item) => item.text === '<end>' || item.is_final));
             if (data.speakerNames) setSpeakerNames(data.speakerNames);
             if (typeof data.title === 'string') setMeta((current) => current ? { ...current, title: data.title ?? '' } : current);
-            paint();
+            followLatest.current = true;
+            paint([], true);
           }
           if (data.type === 'transcript' && data.tokens) {
             const interim: TranscriptToken[] = [];
+            const finals: TranscriptToken[] = [];
             for (const item of data.tokens) {
               if (item.text === '<end>' || item.is_final) finals.push(item);
               else interim.push(item);
             }
+            if (finals.length) ingestCaptionTokens(fold, finals);
             paint(interim);
           }
           if (data.type === 'speakers' && data.names) setSpeakerNames(data.names);
@@ -189,28 +207,63 @@ export function LivePage({ token }: { token: string }) {
     return () => document.removeEventListener('fullscreenchange', onChange);
   }, []);
 
-  useEffect(() => {
+  function showEarlierCaptions() {
+    const end = Math.min(windowEndRef.current, segments.length);
+    if (end <= captionLimitRef.current) return;
+    followLatest.current = false;
+    setShowJump(true);
+    const node = stackRef.current;
+    if (node) scrollAnchor.current = node.scrollHeight;
+    const next = Math.min(end, captionLimitRef.current + 80);
+    captionLimitRef.current = next;
+    setCaptionLimit(next);
+  }
+  useLayoutEffect(() => {
     if (!reading) { setShowJump(false); return; }
-    if (!followLatest.current) return;
     const node = stackRef.current;
     if (!node) return;
+    if (followLatest.current) {
+      scrollAnchor.current = 0;
+      scrolling.current = true;
+      node.scrollTop = node.scrollHeight;
+      requestAnimationFrame(() => { scrolling.current = false; });
+      return;
+    }
+    const before = scrollAnchor.current;
+    if (!before) return;
+    scrollAnchor.current = 0;
+    const delta = node.scrollHeight - before;
+    if (delta <= 0) return;
     scrolling.current = true;
-    node.scrollTop = node.scrollHeight;
+    node.scrollTop += delta;
     requestAnimationFrame(() => { scrolling.current = false; });
-  }, [segments, reading]);
+  }, [segments, reading, captionLimit, windowEnd]);
 
   function onStackScroll() {
     if (!reading || scrolling.current) return;
     const node = stackRef.current;
     if (!node) return;
-    const near = node.scrollHeight - node.scrollTop - node.clientHeight < 48;
+    const distance = node.scrollHeight - node.scrollTop - node.clientHeight;
+    const near = distance < 48;
     followLatest.current = near;
     setShowJump(!near && node.scrollHeight > node.clientHeight);
+    if (near) {
+      if (captionLimitRef.current !== 80) { captionLimitRef.current = 80; setCaptionLimit(80); }
+      if (windowEndRef.current !== segments.length) {
+        windowEndRef.current = segments.length;
+        setWindowEnd(segments.length);
+      }
+      return;
+    }
+    if (node.scrollTop < 72 && node.scrollHeight > node.clientHeight + 8) showEarlierCaptions();
   }
   function jumpLatest() {
-    const node = stackRef.current;
     followLatest.current = true;
     setShowJump(false);
+    windowEndRef.current = segments.length;
+    setWindowEnd(segments.length);
+    if (captionLimitRef.current !== 80) { captionLimitRef.current = 80; setCaptionLimit(80); }
+    const node = stackRef.current;
     if (!node) return;
     scrolling.current = true;
     node.scrollTop = node.scrollHeight;
@@ -232,6 +285,10 @@ export function LivePage({ token }: { token: string }) {
     else { await node.requestFullscreen(); setControlsOpen(false); }
   }
 
+  const captionEnd = reading ? Math.min(windowEnd, segments.length) : segments.length;
+  const captionPage = reading ? captionLimit : 8;
+  const hiddenCaptions = Math.max(0, captionEnd - captionPage);
+  const visibleCaptions = segments.slice(hiddenCaptions, captionEnd);
   const title = meta?.title?.trim() || tr('这场翻译正在进行');
   const direction = meta ? `${meta.languageA.toUpperCase()} ${meta.mode === 'two_way' ? '↔' : '→'} ${meta.languageB.toUpperCase()}` : '';
   const waitingCopy = meta?.mode === 'two_way' ? tr('等待讲者开始…') : tr('老师还没开始，留在这个页面');
@@ -248,12 +305,14 @@ export function LivePage({ token }: { token: string }) {
       <div className="projection-stack" ref={stackRef} onScroll={onStackScroll}>
         {segments.length === 0 && <div className="projection-wait" role="status"><strong>{title}</strong><span>{direction}</span><em>{reconnecting ? tr('连接中断，正在恢复…') : meta.phase === 'waiting' ? waitingCopy : tr('正在聆听')}</em></div>}
         {reading && segments.length > 0 && <div className="projection-spacer" />}
-        {segments.map((segment, index) => {
+        {reading && hiddenCaptions > 0 && <button type="button" className="earlier-captions" onClick={showEarlierCaptions}>{tr('更早的字幕')}</button>}
+        {visibleCaptions.map((segment, index) => {
+          const position = hiddenCaptions + index;
           const big = view === 'source' ? (segment.source || segment.translation) : (segment.translation || segment.source);
           const small = view === 'both' && segment.translation && segment.source ? segment.source : '';
           const speakerName = segment.speaker ? speakerNames[segment.speaker] ?? `${tr('说话人')} ${segment.speaker}` : '';
-          const current = index === segments.length - 1;
-          return <article className={`projection-line${current ? ' current' : ''}${segment.interim ? ' interim' : ''}`} key={segment.interim ? 'live' : `line-${index}`}>
+          const current = position === segments.length - 1;
+          return <article className={`projection-line${current ? ' current' : ''}${segment.interim ? ' interim' : ''}`} key={segment.interim ? 'live' : `line-${position}`}>
             {speakerName && <span>{speakerName}</span>}
             <p>{big || '…'}</p>
             {small && <small>{small}</small>}

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { extractActionItems, foldCaptionTurns, splitQuotaCharge, summaryChargeSeconds } from '../../../packages/shared/src/index.ts';
+import { createCaptionFold, extractActionItems, foldCaptionTurns, ingestCaptionTokens, projectCaptionTurns, splitQuotaCharge, summaryChargeSeconds, type TranscriptToken } from '../../../packages/shared/src/index.ts';
 import { audienceIsOpen } from '../src/lib/audience.ts';
 import { classifyGlossaryImport } from '../src/lib/glossary-import.ts';
 import { buildMeetingMarkdown, formatClock } from '../src/export/meeting.ts';
@@ -54,6 +54,34 @@ test('caption turns split when the speaker changes and keep interim text open', 
   ], [], true);
   assert.equal(flushed[0]?.interim, false);
   assert.equal(flushed[0]?.translation, 'Hello.');
+});
+
+test('incremental caption folding matches folding the whole token list', () => {
+  const batches: TranscriptToken[][] = [
+    [
+      { text: '你好。', translation_status: 'original', language: 'zh', speaker: '1', start_ms: 1000, end_ms: 1800, is_final: true },
+      { text: '世界。', translation_status: 'original', language: 'zh', speaker: '1', start_ms: 2000, end_ms: 2600, is_final: true }
+    ],
+    [
+      { text: 'Hello', translation_status: 'translation', is_final: true },
+      { text: ' world.', translation_status: 'translation', is_final: false }
+    ],
+    [
+      { text: ' world.', translation_status: 'translation', is_final: true },
+      { text: '<end>', is_final: true },
+      { text: 'Next', translation_status: 'original', language: 'en', speaker: '2', is_final: true }
+    ]
+  ];
+  const fold = createCaptionFold();
+  const finals: TranscriptToken[] = [];
+  for (const batch of batches) {
+    const incoming = batch.filter((token) => token.text === '<end>' || token.is_final);
+    const interim = batch.filter((token) => token.text !== '<end>' && !token.is_final);
+    ingestCaptionTokens(fold, incoming);
+    finals.push(...incoming);
+    assert.deepEqual(projectCaptionTurns(fold, interim), foldCaptionTurns(finals, interim));
+  }
+  assert.deepEqual(projectCaptionTurns(fold, [], true), foldCaptionTurns(finals, [], true));
 });
 
 test('meeting markdown includes a missing summary and timed lines', () => {

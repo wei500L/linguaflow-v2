@@ -106,6 +106,15 @@ function blankTurn(): CaptionTurn {
   return { source: '', translation: '', interim: false };
 }
 
+export type CaptionFold = {
+  committed: CaptionTurn[];
+  open: CaptionTurn | null;
+};
+
+export function createCaptionFold(): CaptionFold {
+  return { committed: [], open: null };
+}
+
 function languageCode(value?: string) {
   return value?.toLowerCase().split('-')[0] ?? '';
 }
@@ -120,58 +129,66 @@ function sameLanguage(current: string | undefined, next: string | undefined) {
   return languageCode(current) === languageCode(next);
 }
 
-export function foldCaptionTurns(finalTokens: TranscriptToken[], interimTokens: TranscriptToken[] = [], flush = false): CaptionTurn[] {
-  const turns: CaptionTurn[] = [];
-  const state: { open: CaptionTurn | null } = { open: null };
+function commitOpenTurn(state: CaptionFold) {
+  const current = state.open;
+  state.open = null;
+  if (!current || !(current.source.trim() || current.translation.trim())) return;
+  current.source = current.source.trim();
+  current.translation = current.translation.trim();
+  current.interim = false;
+  state.committed.push(current);
+}
 
-  const commit = () => {
-    const current = state.open;
-    state.open = null;
-    if (!current || !(current.source.trim() || current.translation.trim())) return;
-    current.source = current.source.trim();
-    current.translation = current.translation.trim();
-    current.interim = false;
-    turns.push(current);
-  };
-
-  const apply = (token: TranscriptToken) => {
-    const text = token.text ?? '';
-    if (text === '<end>') { commit(); return; }
-    if (!text) return;
-    const translated = token.translation_status === 'translation';
-    if (!translated) {
-      const previous = state.open;
-      if (previous && (!sameTag(previous.speaker, token.speaker) || !sameLanguage(previous.language, token.language))) commit();
-      state.open ??= blankTurn();
-      const open = state.open;
-      if (!open.language && token.language) open.language = token.language;
-      if (!open.speaker && token.speaker) open.speaker = token.speaker;
-      if (open.startMs === undefined && typeof token.start_ms === 'number') open.startMs = token.start_ms;
-      if (typeof token.end_ms === 'number') open.endMs = token.end_ms;
-      open.source += text;
-      if (!token.translation_status && (token.translation || token.translation_text)) open.translation += token.translation ?? token.translation_text ?? '';
-      return;
-    }
+function applyCaptionToken(state: CaptionFold, token: TranscriptToken) {
+  const text = token.text ?? '';
+  if (text === '<end>') { commitOpenTurn(state); return; }
+  if (!text) return;
+  const translated = token.translation_status === 'translation';
+  if (!translated) {
+    const previous = state.open;
+    if (previous && (!sameTag(previous.speaker, token.speaker) || !sameLanguage(previous.language, token.language))) commitOpenTurn(state);
     state.open ??= blankTurn();
     const open = state.open;
-    if (!open.language && token.source_language) open.language = token.source_language;
-    open.translation += text;
-  };
+    if (!open.language && token.language) open.language = token.language;
+    if (!open.speaker && token.speaker) open.speaker = token.speaker;
+    if (open.startMs === undefined && typeof token.start_ms === 'number') open.startMs = token.start_ms;
+    if (typeof token.end_ms === 'number') open.endMs = token.end_ms;
+    open.source += text;
+    if (!token.translation_status && (token.translation || token.translation_text)) open.translation += token.translation ?? token.translation_text ?? '';
+    return;
+  }
+  state.open ??= blankTurn();
+  const open = state.open;
+  if (!open.language && token.source_language) open.language = token.source_language;
+  open.translation += text;
+}
 
-  for (const token of finalTokens) apply(token);
+export function ingestCaptionTokens(state: CaptionFold, tokens: TranscriptToken[]) {
+  for (const token of tokens) applyCaptionToken(state, token);
+}
+
+function presentOpenTurn(turn: CaptionTurn, interim: boolean): CaptionTurn {
+  return { ...turn, source: turn.source.trim(), translation: turn.translation.trim(), interim };
+}
+
+export function projectCaptionTurns(state: CaptionFold, interimTokens: TranscriptToken[] = [], flush = false): CaptionTurn[] {
+  const scratch = createCaptionFold();
+  scratch.open = state.open ? { ...state.open } : null;
   let sawInterim = false;
   for (const token of interimTokens) {
-    apply(token);
+    applyCaptionToken(scratch, token);
     if ((token.text ?? '') && token.text !== '<end>') sawInterim = true;
   }
-  const current = state.open;
-  if (current && (current.source.trim() || current.translation.trim())) {
-    current.source = current.source.trim();
-    current.translation = current.translation.trim();
-    current.interim = sawInterim || !flush;
-    turns.push(current);
-  }
+  const turns = state.committed.concat(scratch.committed);
+  const current = scratch.open;
+  if (current && (current.source.trim() || current.translation.trim())) turns.push(presentOpenTurn(current, sawInterim || !flush));
   return turns;
+}
+
+export function foldCaptionTurns(finalTokens: TranscriptToken[], interimTokens: TranscriptToken[] = [], flush = false): CaptionTurn[] {
+  const state = createCaptionFold();
+  ingestCaptionTokens(state, finalTokens);
+  return projectCaptionTurns(state, interimTokens, flush);
 }
 
 export function pairTimedLines(sourcePieces: TimedPiece[], translationPieces: TimedPiece[]): TimedLine[] {

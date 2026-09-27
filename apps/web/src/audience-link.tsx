@@ -123,11 +123,11 @@ export function AudienceLink({ sessionId, mode }: { sessionId: string; mode: Ses
   }
   async function revoke() {
     const ticket = ++generation.current;
-    markRevoked(sessionId);
     setBusy(true); setError('');
     try {
       await api(`/v1/realtime/sessions/${sessionId}/audience`, { method: 'DELETE' });
       if (ticket !== generation.current) return;
+      markRevoked(sessionId);
       setAudience(null); setNotice(''); setViewerCount(0); syncedToken.current = '';
     } catch (err) { if (ticket === generation.current) setError(err instanceof Error ? err.message : tr('操作失败')); }
     finally {

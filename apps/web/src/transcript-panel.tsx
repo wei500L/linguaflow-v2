@@ -164,11 +164,10 @@ export function TranscriptPanel({ onClose, focusId = null }: { onClose: () => vo
   const [playheadMs, setPlayheadMs] = useState<number | null>(null);
   const audioRef = useRef<HTMLAudioElement>(null);
   const activeRowRef = useRef<HTMLButtonElement>(null);
+  const listGeneration = useRef(0);
+  const listAbort = useRef<AbortController | null>(null);
 
-  async function refresh(cursor?: string | null) {
-    const appending = Boolean(cursor);
-    if (!appending) setLoading(true);
-    setError('');
+  function listParams(cursor?: string | null) {
     const params = new URLSearchParams();
     if (query.trim()) params.set('q', query.trim());
     if (audioFilter) params.set('audio', audioFilter);
@@ -180,15 +179,38 @@ export function TranscriptPanel({ onClose, focusId = null }: { onClose: () => vo
     if (starredOnly) params.set('starred', '1');
     if (tagFilter.trim()) params.set('tag', tagFilter.trim());
     if (cursor) params.set('cursor', cursor);
+    return params;
+  }
+  function beginListRequest() {
+    listAbort.current?.abort();
+    const controller = new AbortController();
+    listAbort.current = controller;
+    listGeneration.current += 1;
+    return { requestId: listGeneration.current, signal: controller.signal };
+  }
+  async function runList(cursor: string | null | undefined, requestId: number, signal?: AbortSignal) {
+    const appending = Boolean(cursor);
+    if (!appending) setLoading(true);
+    setError('');
     try {
-      const page = await api<{ items: TranscriptItem[]; nextCursor: string | null }>(`/v1/transcripts?${params}`);
+      const page = await api<{ items: TranscriptItem[]; nextCursor: string | null }>(`/v1/transcripts?${listParams(cursor)}`, { signal });
+      if (requestId !== listGeneration.current) return;
       setItems((current) => appending ? [...current, ...page.items] : page.items);
       setNextCursor(page.nextCursor);
-    } catch (err) { setError(message(err, '字幕加载失败')); }
-    finally { if (!appending) setLoading(false); }
+    } catch (err) {
+      if (requestId !== listGeneration.current) return;
+      if (err instanceof Error && err.name === 'AbortError') return;
+      setError(message(err, '字幕加载失败'));
+    } finally { if (requestId === listGeneration.current && !appending) setLoading(false); }
+  }
+  async function refresh(cursor?: string | null) {
+    if (cursor) { await runList(cursor, listGeneration.current, listAbort.current?.signal); return; }
+    const request = beginListRequest();
+    await runList(undefined, request.requestId, request.signal);
   }
   async function loadShares(id: string) {
-    setShares(await api<ShareLink[]>(`/v1/transcripts/${id}/shares`).catch(() => []));
+    try { setShares(await api<ShareLink[]>(`/v1/transcripts/${id}/shares`)); return true; }
+    catch { return false; }
   }
   async function reload(id: string, syncTitle = false) {
     const detail = await api<TranscriptDetail>(`/v1/transcripts/${id}`);
@@ -197,7 +219,12 @@ export function TranscriptPanel({ onClose, focusId = null }: { onClose: () => vo
     setItems((current) => current.map((item) => item.id === id ? { ...item, title: detail.title, summaryStatus: detail.summaryStatus, summaryError: detail.summaryError, audioStatus: detail.audioStatus } : item));
     return detail;
   }
-  useEffect(() => { const timer = window.setTimeout(() => { void refresh(); }, 250); return () => window.clearTimeout(timer); }, [query, audioFilter, summaryFilter, languageFilter, fromDate, toDate, folderFilter, starredOnly, tagFilter]);
+  useEffect(() => {
+    const request = beginListRequest();
+    const timer = window.setTimeout(() => { void runList(undefined, request.requestId, request.signal); }, 250);
+    return () => window.clearTimeout(timer);
+  }, [query, audioFilter, summaryFilter, languageFilter, fromDate, toDate, folderFilter, starredOnly, tagFilter]);
+  useEffect(() => () => listAbort.current?.abort(), []);
   useEffect(() => { void api<Array<{ id: string; name: string }>>('/v1/transcript-folders').then(setFolders).catch(() => undefined); void api<Array<{ id: string; name: string; languageA: string; languageB: string }>>('/v1/me/glossaries').then(setGlossaries).catch(() => undefined); }, []);
   useEffect(() => { void api<Provider>('/v1/me/summary-provider').then((value) => { setByokReady(value.configured); setPlatformAvailable(Boolean(value.platformAvailable)); if (value.platformAvailable) setProviderChoice('platform'); }).catch(() => undefined); void api<Entitlement>('/v1/me/entitlement').then(setEntitlement).catch(() => undefined); }, []);
   useEffect(() => {
@@ -246,7 +273,7 @@ export function TranscriptPanel({ onClose, focusId = null }: { onClose: () => vo
       const detail = await reload(item.id, true);
       if (detail.summaryTemplate === 'classroom' || detail.summaryTemplate === 'meeting' || detail.summaryTemplate === 'interview' || detail.summaryTemplate === 'briefing') setTemplate(detail.summaryTemplate);
       if (detail.summaryLanguage) setOutputLanguage(detail.summaryLanguage);
-      await loadShares(item.id);
+      if (!await loadShares(item.id)) setShares([]);
     } catch (err) { setDetailError(message(err, '字幕详情加载失败')); }
     finally { setDetailLoading(false); }
   }
@@ -339,11 +366,20 @@ export function TranscriptPanel({ onClose, focusId = null }: { onClose: () => vo
   }
   async function createShare() {
     if (!selected) return;
+    setDetailError('');
     try {
       const hours = Number(shareHours);
-      const share = await api<{ token: string }>(`/v1/transcripts/${selected.id}/shares`, { method: 'POST', body: JSON.stringify({ includeAudio: includeAudioShare && shareScope === 'full', expiresInHours: hours > 0 ? hours : null, password: sharePassword.trim() || undefined, scope: shareScope }) });
-      await navigator.clipboard.writeText(`${window.location.origin}/s/${share.token}`);
-      setNotice(tr('分享链接已复制。')); await loadShares(selected.id);
+      const share = await api<ShareLink>(`/v1/transcripts/${selected.id}/shares`, { method: 'POST', body: JSON.stringify({ includeAudio: includeAudioShare && shareScope === 'full', expiresInHours: hours > 0 ? hours : null, password: sharePassword.trim() || undefined, scope: shareScope }) });
+      const listed = await loadShares(selected.id);
+      if (!listed) setShares((current) => current.some((item) => item.id === share.id) ? current : [...current, share]);
+      const url = `${window.location.origin}/s/${share.token}`;
+      try {
+        await navigator.clipboard.writeText(url);
+        setNotice(tr('分享链接已复制。'));
+      } catch {
+        setNotice(tr('分享链接已创建。'));
+        setDetailError(tr('当前浏览器不允许复制，请手动选择文本。'));
+      }
     } catch (err) { setDetailError(message(err, '导出失败')); }
   }
   async function revokeShare(shareId: string) {
