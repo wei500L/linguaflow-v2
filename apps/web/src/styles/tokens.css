@@ -1,0 +1,136 @@
+/* Design tokens. Light is the default; [data-theme="dark"] on <html> swaps the palette.
+   theme.ts resolves 'system' to an explicit light/dark value before paint, so no rule
+   here needs prefers-color-scheme. */
+
+:root {
+  color-scheme: light;
+
+  --bg: #fbfbfa;
+  --bg-sunken: #f2f3f1;
+  --surface: #ffffff;
+  --surface-2: #f3f4f2;
+  --surface-3: #e9ebe8;
+  --border: #e3e6e2;
+  --border-strong: #c8cfc9;
+
+  --text: #14191a;
+  --text-muted: #5d6866;
+  --text-faint: #8b9592;
+
+  --accent: #0f766e;
+  --accent-hover: #0c5f58;
+  --accent-contrast: #ffffff;
+  --accent-soft: #e3f1ee;
+  --accent-line: #bcdcd6;
+
+  --danger: #b42318;
+  --danger-soft: #fdf0ee;
+  --danger-line: #f3cec9;
+  --warn: #b54708;
+  --warn-soft: #fdf5e8;
+  --warn-line: #ecd9b0;
+  --ok: #067647;
+
+  --shadow-1: 0 1px 2px #14191a0d;
+  --shadow-2: 0 8px 24px #14191a14;
+  --shadow-3: 0 20px 48px #14191a1f;
+  --shadow-up: 0 -8px 28px #14191a14;
+
+  /* Spacing, 4px base. */
+  --s1: 4px;
+  --s2: 8px;
+  --s3: 12px;
+  --s4: 16px;
+  --s5: 20px;
+  --s6: 24px;
+  --s7: 32px;
+  --s8: 48px;
+
+  --r-sm: 8px;
+  --r-md: 12px;
+  --r-lg: 16px;
+  --r-xl: 22px;
+  --r-full: 999px;
+
+  /* Type scale. Body sizes stay >=16px on controls so iOS Safari never zooms on focus. */
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 15px;
+  --text-lg: 17px;
+  --text-xl: clamp(20px, 2.2vw, 24px);
+  --text-2xl: clamp(24px, 3vw, 32px);
+  --text-3xl: clamp(30px, 5vw, 44px);
+  --control-text: 16px;
+
+  /* Caption sizes scale with the viewport so one setting works on a phone and a laptop. */
+  --caption-lead: clamp(20px, 5.2vw, 30px);
+  --caption-sub: clamp(13px, 3.4vw, 16px);
+
+  --tap: 44px;
+
+  --z-dock: 20;
+  --z-sheet: 30;
+  --z-popover: 40;
+  --z-panel: 50;
+  --z-overlay: 60;
+
+  --fast: 120ms;
+  --normal: 200ms;
+  --ease: cubic-bezier(.22, .72, .2, 1);
+
+  --safe-top: env(safe-area-inset-top, 0px);
+  --safe-bottom: env(safe-area-inset-bottom, 0px);
+  --safe-left: env(safe-area-inset-left, 0px);
+  --safe-right: env(safe-area-inset-right, 0px);
+
+  --topbar-h: 52px;
+  --shell-max: 1440px;
+}
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  --bg: #0c1110;
+  --bg-sunken: #080c0b;
+  --surface: #141a19;
+  --surface-2: #1c2322;
+  --surface-3: #252d2c;
+  --border: #ffffff14;
+  --border-strong: #ffffff2b;
+
+  --text: #f2f5f4;
+  --text-muted: #a2aeab;
+  --text-faint: #7b8785;
+
+  /* The accent inverts role in dark: a bright mint carrying dark text. */
+  --accent: #4fd1c5;
+  --accent-hover: #6ee0d5;
+  --accent-contrast: #06201d;
+  --accent-soft: #4fd1c51f;
+  --accent-line: #4fd1c54d;
+
+  --danger: #ff9e91;
+  --danger-soft: #ff9e9114;
+  --danger-line: #ff9e9138;
+  --warn: #f0c36a;
+  --warn-soft: #f0c36a14;
+  --warn-line: #f0c36a38;
+  --ok: #6ee7a8;
+
+  --shadow-1: 0 1px 2px #00000052;
+  --shadow-2: 0 8px 24px #00000066;
+  --shadow-3: 0 20px 48px #00000080;
+  --shadow-up: 0 -8px 28px #00000066;
+}
+
+@media (min-width: 640px) {
+  :root {
+    --topbar-h: 64px;
+  }
+}
+
+@media (min-width: 1024px) {
+  :root {
+    --topbar-h: 72px;
+  }
+}

@@ -1,0 +1,129 @@
+.share-page {
+  min-height: 100dvh;
+  background: var(--bg);
+}
+
+.share-page .topbar {
+  position: sticky;
+  top: 0;
+  z-index: var(--z-dock);
+}
+
+.share-status {
+  max-width: 760px;
+  margin: var(--s7) auto;
+  padding: 0 var(--s4);
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.share-card {
+  display: grid;
+  gap: var(--s3);
+  max-width: 760px;
+  margin: 0 auto;
+  padding: var(--s4) max(var(--s4), var(--safe-left)) calc(var(--s7) + var(--safe-bottom)) max(var(--s4), var(--safe-right));
+  background: var(--bg);
+}
+
+.share-card h1 {
+  font-size: var(--text-2xl);
+  letter-spacing: -.02em;
+  text-wrap: balance;
+}
+
+.share-card h2 {
+  margin: var(--s4) 0 0;
+  color: var(--accent);
+  font-size: var(--text-base);
+  letter-spacing: .02em;
+  text-transform: uppercase;
+}
+
+.share-card section {
+  display: grid;
+  gap: var(--s3);
+}
+
+/* Keeps the language switch reachable while scrolling a long transcript. */
+.share-card .caption-toolbar {
+  position: sticky;
+  top: calc(var(--topbar-h) + var(--safe-top));
+  z-index: 3;
+  margin: 0 calc(var(--s2) * -1);
+  padding: var(--s2);
+  border-radius: var(--r-md);
+  background: var(--bg);
+}
+
+/* A mini player that stays put, because tapping a caption seeks it. */
+.share-card audio {
+  position: sticky;
+  bottom: calc(var(--s2) + var(--safe-bottom));
+  z-index: 3;
+}
+
+.share-card .caption-row {
+  padding: var(--s3) var(--s2);
+  border-bottom: 1px solid var(--border);
+  border-radius: 0;
+  /* Clears the sticky header and toolbar when playback scrolls a row into view. */
+  scroll-margin-top: calc(var(--topbar-h) + var(--safe-top) + 60px);
+}
+
+.share-card .caption-row p {
+  color: var(--text);
+  font-size: var(--text-base);
+}
+
+.share-card .caption-row strong {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  font-weight: 500;
+}
+
+.share-card .caption-row.active {
+  border-radius: var(--r-md);
+  border-bottom-color: transparent;
+}
+
+.share-export {
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.share-export summary {
+  display: flex;
+  align-items: center;
+  min-height: var(--tap);
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.share-export .share-tools {
+  margin-top: var(--s3);
+}
+
+@media (min-width: 640px) {
+  .share-card {
+    gap: var(--s4);
+    margin: var(--s6) auto;
+    padding: var(--s6);
+    border: 1px solid var(--border);
+    border-radius: var(--r-xl);
+    background: var(--surface);
+    box-shadow: var(--shadow-1);
+  }
+
+  .share-card .caption-toolbar {
+    background: var(--surface);
+  }
+
+  .share-card audio {
+    position: static;
+  }
+}

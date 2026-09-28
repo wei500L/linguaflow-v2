@@ -1,6 +1,7 @@
 import { PLANS } from '@linguaflow/shared';
 import { tr, useLang } from './lib/i18n';
 import { LanguageToggle } from './language-toggle';
+import { ThemeToggle } from './theme-toggle';
 
 const scenes = [
   ['会议', '把会议上的话实时变成双语字幕，结束后导出纪要。'],
@@ -51,6 +52,7 @@ export function MarketingPage() {
       <div className="marketing-nav-actions">
         <a href="/privacy">{tr('隐私政策')}</a>
         <a href="/terms">{tr('服务条款')}</a>
+        <ThemeToggle />
         <LanguageToggle />
         <a className="primary-button marketing-nav-cta" href="/">{tr('打开工作区')}</a>
       </div>
@@ -64,7 +66,7 @@ export function MarketingPage() {
     </section>
     <section className="marketing-section">
       <div className="scene-grid">
-        {scenes.map(([title, body]) => <article key={title}><p className="eyebrow">{tr(title)}</p><h2>{tr(title)}</h2><p>{tr(body)}</p></article>)}
+        {scenes.map(([title, body]) => <article key={title}><h2>{tr(title)}</h2><p>{tr(body)}</p></article>)}
       </div>
     </section>
     <section className="marketing-section">
@@ -94,6 +96,7 @@ export function LegalPage({ kind }: { kind: 'privacy' | 'terms' }) {
     <nav className="marketing-nav">
       <a className="wordmark" href="/"><span className="brand-mark small">L</span><strong>LinguaFlow</strong></a>
       <div className="marketing-nav-actions">
+        <ThemeToggle />
         <LanguageToggle />
         <a href="/">{tr('打开工作区')}</a>
       </div>

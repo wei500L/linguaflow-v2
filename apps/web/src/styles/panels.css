@@ -1,0 +1,387 @@
+/* ---------- Panel shell ---------- */
+
+.panel-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: var(--z-panel);
+  display: flex;
+  background: #00000073;
+}
+
+/* On a phone a panel is the whole screen: a sticky header, a scrolling body and
+   safe-area padding, rather than a centred dialog measured against 100vh. */
+.panel {
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+  max-height: none;
+  height: 100%;
+  overflow: hidden;
+  background: var(--surface);
+}
+
+.panel-header {
+  display: flex;
+  flex: none;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: calc(var(--s4) + var(--safe-top)) max(var(--s4), var(--safe-right)) var(--s4) max(var(--s4), var(--safe-left));
+  border-bottom: 1px solid var(--border);
+  background: var(--surface);
+}
+
+.panel-header h2 {
+  margin: 2px 0 0;
+  font-size: var(--text-xl);
+  letter-spacing: -.02em;
+}
+
+.panel-body {
+  display: grid;
+  flex: 1;
+  align-content: start;
+  gap: var(--s4);
+  min-height: 0;
+  padding: var(--s4) max(var(--s4), var(--safe-right)) calc(var(--s6) + var(--safe-bottom)) max(var(--s4), var(--safe-left));
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  -webkit-overflow-scrolling: touch;
+}
+
+/* ---------- Lists ---------- */
+
+.panel-list {
+  display: grid;
+  gap: var(--s2);
+}
+
+.panel-list-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+  color: var(--text);
+  font-size: var(--control-text);
+  text-align: left;
+}
+
+.panel-list-item:hover {
+  border-color: var(--border-strong);
+}
+
+/* The transcript list nests a button inside the row to keep the checkbox separate. */
+.panel-list-item .panel-list-item {
+  flex: 1;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.panel-list-item span:first-child {
+  display: grid;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.panel-list-item strong {
+  font-weight: 650;
+  overflow-wrap: anywhere;
+}
+
+.panel-list-item small {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.panel-empty {
+  display: grid;
+  gap: var(--s2);
+  justify-items: center;
+  padding: var(--s7) var(--s4);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  text-align: center;
+}
+
+/* ---------- Glossary ---------- */
+
+.preset-groups {
+  display: grid;
+  gap: var(--s4);
+}
+
+.preset-groups > div {
+  display: grid;
+  gap: var(--s2);
+}
+
+.glossary-tools {
+  display: grid;
+  gap: var(--s3);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--border);
+}
+
+.term-line {
+  display: grid;
+  gap: var(--s2);
+  width: 100%;
+  min-width: 0;
+}
+
+.term-line strong {
+  font-weight: 650;
+}
+
+.term-edit {
+  width: 100%;
+}
+
+/* ---------- Pricing ---------- */
+
+.usage-card {
+  display: grid;
+  gap: var(--s3);
+}
+
+.admin-stat-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s2);
+}
+
+.admin-stat-grid > div {
+  display: grid;
+  gap: var(--s1);
+  padding: var(--s3);
+  border-radius: var(--r-md);
+  background: var(--accent-soft);
+}
+
+.admin-stat-grid small {
+  color: var(--text-muted);
+  font-size: var(--text-xs);
+}
+
+.admin-stat-grid strong {
+  color: var(--accent);
+  font-size: var(--text-lg);
+}
+
+.usage-grid {
+  grid-template-columns: 1fr 1fr;
+}
+
+.usage-list {
+  display: grid;
+  gap: var(--s2);
+}
+
+.usage-list h3,
+.glossary-tools h3,
+.redeem-box h3 {
+  margin: 0;
+  font-size: var(--text-lg);
+}
+
+.redeem-box {
+  display: grid;
+  gap: var(--s3);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--border);
+}
+
+/* ---------- Account ---------- */
+
+.account-email {
+  margin: 0;
+  font-size: var(--text-lg);
+  font-weight: 700;
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Admin ---------- */
+
+.generated-codes {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.generated-codes-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.generated-codes code {
+  color: var(--accent);
+  font-size: var(--text-sm);
+  overflow-wrap: anywhere;
+}
+
+/* ---------- Transcript library ---------- */
+
+.transcript-search {
+  display: grid;
+  gap: var(--s2);
+}
+
+.transcript-filters {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--s2);
+  align-items: center;
+}
+
+.transcript-filters .record-toggle {
+  grid-column: 1 / -1;
+}
+
+.transcript-detail {
+  display: grid;
+  gap: var(--s4);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--border);
+}
+
+.transcript-detail > p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.transcript-detail strong {
+  color: var(--accent);
+}
+
+.meeting-audio {
+  display: grid;
+  gap: var(--s2);
+}
+
+.share-box {
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.share-link {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3);
+  border-radius: var(--r-md);
+  background: var(--surface);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.5;
+}
+
+.share-link > span {
+  overflow-wrap: anywhere;
+}
+
+.speaker-roster {
+  display: grid;
+  gap: var(--s2);
+}
+
+/* ---------- Tablet and up ---------- */
+
+@media (min-width: 640px) {
+  .panel-backdrop {
+    align-items: center;
+    justify-content: center;
+    padding: var(--s6);
+  }
+
+  .panel {
+    width: min(760px, 100%);
+    height: auto;
+    max-height: min(820px, calc(100dvh - var(--s8)));
+    border-radius: var(--r-xl);
+    box-shadow: var(--shadow-3);
+  }
+
+  .panel-wide {
+    width: min(960px, 100%);
+  }
+
+  .panel-header {
+    padding: var(--s5) var(--s5) var(--s4);
+  }
+
+  .panel-body {
+    padding: var(--s5);
+  }
+
+  .panel-header h2 {
+    font-size: var(--text-2xl);
+  }
+
+  .term-line {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: var(--s3);
+  }
+
+  .term-line > span:first-child {
+    display: grid;
+    gap: var(--s1);
+    min-width: 0;
+  }
+
+  .term-edit {
+    display: grid;
+    grid-template-columns: 1fr auto 1fr auto auto;
+    align-items: center;
+  }
+
+  .transcript-filters {
+    display: flex;
+    flex-wrap: wrap;
+  }
+
+  .transcript-filters > select,
+  .transcript-filters > input {
+    flex: 1 1 160px;
+  }
+
+  .share-link {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .share-link > span {
+    flex: 1 1 260px;
+  }
+
+  .admin-stat-grid,
+  .usage-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+}
+
+@media (min-width: 1024px) {
+  .usage-grid {
+    grid-template-columns: repeat(6, 1fr);
+  }
+}

@@ -24,5 +24,5 @@ export function PanelShell({ title, onClose, children, wide = false }: { title: 
     window.addEventListener('keydown', onKeyDown);
     return () => { window.removeEventListener('keydown', onKeyDown); document.body.style.overflow = previousOverflow; previousFocus.current?.focus(); };
   }, []);
-  return <div className="panel-backdrop" onClick={onClose}><section ref={panelRef} className={`panel${wide ? ' panel-wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onClick={(event) => event.stopPropagation()}><div className="panel-header"><div><p className="eyebrow">LINGUAFLOW</p><h2 id={titleId}>{title}</h2></div><button ref={closeRef} className="icon-button" onClick={onClose} aria-label={tr('关闭')}>×</button></div>{children}</section></div>;
+  return <div className="panel-backdrop" onClick={onClose}><section ref={panelRef} className={`panel${wide ? ' panel-wide' : ''}`} role="dialog" aria-modal="true" aria-labelledby={titleId} tabIndex={-1} onClick={(event) => event.stopPropagation()}><div className="panel-header"><div><p className="eyebrow">LINGUAFLOW</p><h2 id={titleId}>{title}</h2></div><button ref={closeRef} className="icon-button" onClick={onClose} aria-label={tr('关闭')}>×</button></div><div className="panel-body">{children}</div></section></div>;
 }

@@ -1,9 +1,12 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, type TranscriptToken } from '@linguaflow/shared';
 import { apiOrigin } from './lib/api';
+import { READING_QUERY, useMediaQuery } from './lib/breakpoints';
 import { lockProgrammaticScroll, nudgeToBottom } from './lib/follow-scroll';
 import { tr, useLang } from './lib/i18n';
+import { forceDark } from './lib/theme';
 import { LanguageToggle } from './language-toggle';
+import { ThemeToggle } from './theme-toggle';
 
 type LiveMeta = { title: string; mode: string; languageA: string; languageB: string; phase: string; empty?: boolean; websocketUrl?: string; websocketProtocols?: string[] };
 type CaptionView = 'both' | 'translation' | 'source';
@@ -12,7 +15,6 @@ type ScreenLock = { release: () => Promise<void> };
 
 const viewKey = 'linguaflow_live_view';
 const sizeKey = 'linguaflow_live_size';
-const readingQuery = '(max-width: 1099px)';
 
 function storedView(): CaptionView | null {
   try {
@@ -28,21 +30,15 @@ function storedSize(): CaptionSize {
   } catch { return 'lg'; }
 }
 
-function useReadingLayout() {
-  const [reading, setReading] = useState(() => window.matchMedia(readingQuery).matches);
-  useEffect(() => {
-    const media = window.matchMedia(readingQuery);
-    const onChange = () => setReading(media.matches);
-    onChange();
-    media.addEventListener('change', onChange);
-    return () => media.removeEventListener('change', onChange);
-  }, []);
-  return reading;
-}
-
 export function LivePage({ token }: { token: string }) {
   useLang();
-  const reading = useReadingLayout();
+  /* A projector is always the dark stage. A personal screen follows the reader's
+     own theme, since a student may be reading this in a bright hall. */
+  const reading = useMediaQuery(READING_QUERY);
+  useEffect(() => {
+    forceDark(!reading);
+    return () => forceDark(false);
+  }, [reading]);
   const [meta, setMeta] = useState<LiveMeta | null>(null);
   const [error, setError] = useState('');
   const [reconnecting, setReconnecting] = useState(false);
@@ -331,6 +327,7 @@ export function LivePage({ token }: { token: string }) {
         <button type="button" aria-label={tr('大')} className={`size-lg${size === 'lg' ? ' active' : ''}`} onClick={() => chooseSize('lg')}>A</button>
         <button type="button" aria-label={tr('特大')} className={`size-xl${size === 'xl' ? ' active' : ''}`} onClick={() => chooseSize('xl')}>A</button>
       </div>
+      {reading && <ThemeToggle className="projection-theme" />}
       <button type="button" onClick={() => void toggleFullscreen()}>{fullscreen ? tr('退出全屏') : tr('全屏')}</button>
       <LanguageToggle className="projection-lang" />
     </div>}

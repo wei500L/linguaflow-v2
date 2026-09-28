@@ -1,0 +1,136 @@
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  /* Stops iOS from inflating text when a phone rotates to landscape. */
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  font-size: var(--text-base);
+  color: var(--text);
+  background: var(--bg);
+  font-synthesis: none;
+  text-rendering: optimizeLegibility;
+  /* Keeps a rubber-band scroll inside a caption list from dragging the whole page. */
+  overscroll-behavior: none;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+p {
+  margin: 0;
+}
+
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+  font-size: var(--control-text);
+  color: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button:disabled {
+  opacity: .55;
+  cursor: not-allowed;
+}
+
+a {
+  color: var(--accent);
+}
+
+img,
+svg,
+audio,
+video {
+  max-width: 100%;
+}
+
+audio {
+  width: 100%;
+}
+
+code,
+pre {
+  font-family: ui-monospace, SFMono-Regular, monospace;
+}
+
+:focus-visible {
+  outline: 3px solid var(--accent-line);
+  outline-offset: 2px;
+}
+
+/* Every interactive control clears the 44px touch minimum on phones. Desktop gets
+   its density back at the 640px breakpoint. */
+button,
+[role='button'],
+select,
+summary {
+  min-height: var(--tap);
+}
+
+input:not([type='checkbox']):not([type='radio']),
+textarea {
+  min-height: var(--tap);
+}
+
+input[type='checkbox'],
+input[type='radio'] {
+  width: 20px;
+  height: 20px;
+  accent-color: var(--accent);
+  margin: 0;
+  flex: none;
+}
+
+@media (min-width: 640px) {
+  :root {
+    --control-text: 15px;
+    --tap: 36px;
+  }
+}
+
+/* A phone in landscape is wider than 640px but still driven by a thumb, so the
+   touch minimum follows the pointer rather than the viewport. */
+@media (pointer: coarse) {
+  :root {
+    --tap: 44px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: .01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: .01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+  border: 0;
+}

@@ -1,0 +1,355 @@
+/* ---------- Auth ---------- */
+
+.auth-layout {
+  display: grid;
+  grid-template-columns: 1fr;
+  min-height: 100dvh;
+  background: var(--bg);
+}
+
+/* On a phone the pitch column collapses to a compact brand header rather than
+   disappearing, so the sign-in screen still says what the product is. */
+.auth-pitch {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--s2);
+  padding: calc(var(--s5) + var(--safe-top)) max(var(--s5), var(--safe-left)) var(--s4) max(var(--s5), var(--safe-right));
+  background: var(--accent-soft);
+}
+
+.auth-pitch .brand-mark {
+  margin-bottom: var(--s2);
+}
+
+.auth-pitch .eyebrow {
+  margin: 0;
+}
+
+.auth-pitch h1 {
+  margin: 0;
+  font-size: clamp(26px, 7vw, 60px);
+  font-weight: 650;
+  line-height: 1.18;
+  letter-spacing: -.035em;
+  text-wrap: balance;
+}
+
+.auth-pitch h1 em {
+  color: var(--accent);
+  font-style: normal;
+}
+
+.auth-pitch > p:not(.eyebrow) {
+  max-width: 34em;
+  color: var(--text-muted);
+  font-size: var(--text-base);
+  line-height: 1.65;
+}
+
+/* The sample caption card is decoration; a phone has better uses for the space. */
+.auth-pitch .demo-card {
+  display: none;
+}
+
+.demo-card {
+  display: grid;
+  gap: var(--s2);
+  width: min(100%, 430px);
+  padding: var(--s5);
+  border: 1px solid var(--accent-line);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+  box-shadow: var(--shadow-2);
+}
+
+.demo-card span {
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  letter-spacing: .1em;
+}
+
+.demo-card strong {
+  color: var(--text-muted);
+  font-size: var(--text-base);
+}
+
+.demo-card small {
+  color: var(--accent);
+  font-size: var(--text-xl);
+  font-weight: 700;
+}
+
+.auth-card {
+  display: grid;
+  align-content: start;
+  gap: var(--s4);
+  width: 100%;
+  max-width: 420px;
+  margin: 0 auto;
+  padding: var(--s6) max(var(--s4), var(--safe-left)) calc(var(--s7) + var(--safe-bottom)) max(var(--s4), var(--safe-right));
+}
+
+.auth-card-header {
+  display: grid;
+  gap: var(--s2);
+  justify-items: start;
+}
+
+.auth-card-header h2 {
+  margin: var(--s2) 0 0;
+  font-size: var(--text-2xl);
+  letter-spacing: -.02em;
+}
+
+.auth-card-header p {
+  margin: 0;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
+.auth-card label {
+  display: grid;
+  gap: 6px;
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+/* Replaces a negative margin that broke whenever the input height changed. */
+.password-field {
+  position: relative;
+  display: block;
+}
+
+.password-field input {
+  padding-right: 72px;
+}
+
+.password-toggle {
+  position: absolute;
+  top: 50%;
+  right: 6px;
+  min-height: 34px;
+  padding: 0 var(--s2);
+  border: 0;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  transform: translateY(-50%);
+}
+
+.auth-links {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s4);
+  align-items: center;
+}
+
+.auth-legal {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s4);
+  margin: 0;
+}
+
+.auth-legal a,
+.marketing-footer a {
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 650;
+}
+
+@media (min-width: 1024px) {
+  .auth-layout {
+    grid-template-columns: 1fr 1fr;
+  }
+
+  .auth-pitch {
+    gap: var(--s4);
+    padding: 10vh 6vw;
+  }
+
+  .auth-pitch .demo-card {
+    display: grid;
+    margin-top: var(--s6);
+  }
+
+  .auth-pitch > p:not(.eyebrow) {
+    font-size: var(--text-lg);
+  }
+
+  .auth-card {
+    align-content: center;
+    padding: var(--s7);
+  }
+}
+
+/* ---------- Marketing ---------- */
+
+.marketing-page {
+  min-height: 100dvh;
+  background: var(--accent-soft);
+}
+
+.marketing-nav {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding: calc(var(--s3) + var(--safe-top)) max(var(--s4), var(--safe-left)) var(--s3) max(var(--s4), var(--safe-right));
+}
+
+.marketing-nav a {
+  color: var(--accent);
+  font-size: var(--text-sm);
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.marketing-nav-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.marketing-nav-cta {
+  color: var(--accent-contrast) !important;
+  padding: 0 var(--s4);
+}
+
+.marketing-hero {
+  display: grid;
+  gap: var(--s4);
+  justify-items: start;
+  max-width: 920px;
+  margin: 0 auto;
+  padding: clamp(var(--s6), 8vh, 15vh) max(var(--s4), var(--safe-left)) clamp(var(--s7), 10vh, 20vh) max(var(--s4), var(--safe-right));
+}
+
+.marketing-hero h1 {
+  max-width: 850px;
+  margin: 0;
+  font-size: clamp(34px, 9vw, 96px);
+  font-weight: 650;
+  /* An em-based track scales with the clamped size instead of crushing small text. */
+  letter-spacing: -.045em;
+  line-height: 1.04;
+  text-wrap: balance;
+}
+
+.marketing-hero > p:not(.eyebrow) {
+  max-width: 34em;
+  color: var(--text-muted);
+  font-size: var(--text-lg);
+  line-height: 1.65;
+}
+
+.marketing-cta {
+  text-decoration: none;
+}
+
+.marketing-hero small {
+  display: block;
+  max-width: 40em;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  line-height: 1.6;
+}
+
+.marketing-section {
+  display: grid;
+  gap: var(--s3);
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 max(var(--s4), var(--safe-left)) var(--s7) max(var(--s4), var(--safe-right));
+}
+
+.marketing-section h2 {
+  font-size: var(--text-2xl);
+  letter-spacing: -.02em;
+  text-wrap: balance;
+}
+
+.scene-grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--s3);
+}
+
+.scene-grid article,
+.legal-card {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s5);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  background: var(--surface);
+}
+
+.scene-grid h2,
+.legal-card h1 {
+  margin: 0;
+  font-size: var(--text-xl);
+  letter-spacing: -.02em;
+}
+
+.scene-grid p,
+.legal-card p,
+.marketing-note {
+  margin: 0;
+  color: var(--text-muted);
+  line-height: 1.7;
+}
+
+.marketing-demo,
+.marketing-plans {
+  margin: 0;
+}
+
+.marketing-footer {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s4);
+  max-width: 1080px;
+  margin: 0 auto;
+  padding: 0 max(var(--s4), var(--safe-left)) calc(var(--s7) + var(--safe-bottom)) max(var(--s4), var(--safe-right));
+}
+
+.legal-page .legal-card {
+  display: grid;
+  gap: var(--s3);
+  max-width: 760px;
+  margin: var(--s5) auto;
+}
+
+.legal-page .legal-card h1 {
+  font-size: var(--text-2xl);
+}
+
+@media (min-width: 640px) {
+  .scene-grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+
+  .marketing-nav {
+    padding-left: max(var(--s6), var(--safe-left));
+    padding-right: max(var(--s6), var(--safe-right));
+  }
+}
+
+@media (min-width: 1024px) {
+  .scene-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .marketing-nav {
+    height: 76px;
+    padding-left: max(var(--s7), calc((100vw - 1280px) / 2));
+    padding-right: max(var(--s7), calc((100vw - 1280px) / 2));
+  }
+}

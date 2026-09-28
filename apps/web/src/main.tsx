@@ -2,25 +2,26 @@ import { StrictMode, useEffect, useLayoutEffect, useMemo, useRef, useState } fro
 import { createRoot } from 'react-dom/client';
 import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, LANGUAGE_OPTIONS, PLANS, type Entitlement, type RealtimeEvent, type TranscriptToken } from '@linguaflow/shared';
 import { api, ApiError, apiResponse, clearToken, getToken, isTokenExpired, setToken, tokenExpiresWithin } from './lib/api';
+import { PHONE_QUERY, useMediaQuery, useViewportHeight } from './lib/breakpoints';
 import { createPcmStream, listAudioInputs, type AudioSource } from './lib/audio';
 import { glossaryOptionLabel, languageNative, sameLanguageCode } from './lib/glossary';
 import { lockProgrammaticScroll, nudgeToBottom } from './lib/follow-scroll';
 import { getLang, tr, useLang } from './lib/i18n';
 import { LanguageToggle } from './language-toggle';
+import { ThemeToggle } from './theme-toggle';
 import { LegalPage, MarketingPage } from './marketing';
 import { PanelShell } from './panel-shell';
 import { SharePage } from './share-page';
 import { TranscriptPanel } from './transcript-panel';
-import { AudienceLink } from './audience-link';
 import { FirstRun } from './first-run';
 import { LivePage } from './live-page';
+import { Topbar, type Panel, type ServiceStatus } from './workspace-topbar';
+import { CaptionStage, CaptionToolbar, type CaptionView, type Segment, type SessionStatus } from './caption-stage';
+import { ControlDock } from './control-dock';
+import { SessionNotices, type Notice } from './session-notices';
 import './styles.css';
 
-type Segment = { source: string; translation: string; speaker?: string; language?: string; interim?: boolean };
 type Profile = { id: string; email: string; displayName?: string | null; role: string };
-type Panel = 'none' | 'transcripts' | 'glossary' | 'pricing' | 'admin' | 'account';
-type SessionStatus = 'idle' | 'opening' | 'connecting' | 'running' | 'reconnecting' | 'stopping';
-type ServiceStatus = 'checking' | 'online' | 'offline';
 
 function AuthScreen({ onLogin }: { onLogin: () => void }) {
   const [mode, setMode] = useState<'login' | 'register' | 'code_login' | 'reset'>('login');
@@ -50,14 +51,7 @@ function AuthScreen({ onLogin }: { onLogin: () => void }) {
       }
     } catch (error) { setMessage(error instanceof Error ? error.message : tr('操作失败')); } finally { setBusy(false); }
   }
-  return <main className="auth-layout"><section className="auth-pitch"><div className="brand-mark">L</div><p className="eyebrow">LINGUAFLOW</p><h1>{tr('让每一次对话，')}<br /><em>{tr('自然地抵达')}</em></h1><p>{tr('实时语音识别、翻译与字幕记录，适用于会议、课堂和跨语言交流。')}</p><div className="demo-card"><span>ZH · 00:18</span><strong>{tr('欢迎来到 LinguaFlow')}</strong><small>Welcome to LinguaFlow</small></div></section><form className="auth-card" onSubmit={submit}><div className="auth-card-header"><LanguageToggle /><h2>{mode === 'register' ? tr('创建账户') : mode === 'reset' ? tr('重置密码') : tr('登录 LinguaFlow')}</h2><p>{tr('继续使用你的实时翻译工作区')}</p></div><label>{tr('邮箱')}<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="you@example.com" autoComplete="email" /></label>{mode !== 'code_login' && <label>{mode === 'reset' ? tr('新密码') : tr('密码')}<input type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} placeholder={tr('至少 8 位字符')} autoComplete={mode === 'reset' || mode === 'register' ? 'new-password' : 'current-password'} /><button type="button" className="password-toggle" aria-label={showPassword ? tr('隐藏密码') : tr('显示密码')} onClick={() => setShowPassword((value) => !value)}>{showPassword ? tr('隐藏') : tr('显示')}</button></label>}{mode !== 'login' && <label>{tr('验证码')}<input ref={codeInput} value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" placeholder={tr('邮箱验证码')} required={mode !== 'register'} autoComplete="one-time-code" /></label>}{mode !== 'login' && <button type="button" className="link-button" disabled={cooldown > 0 || busy} onClick={() => void sendVerificationCode().catch((error) => setMessage(error.message))}>{cooldown > 0 ? `${cooldown} ${tr('秒后重发')}` : tr('发送验证码')}</button>}{message && <div className="form-message" role="alert">{message}</div>}<button className="primary-button" disabled={busy}>{busy ? tr('处理中…') : mode === 'login' ? tr('登录') : mode === 'register' ? tr('完成注册') : mode === 'reset' ? tr('重置密码') : tr('验证码登录')}</button><button type="button" className="link-button" onClick={() => { setMode('code_login'); setMessage(''); }}>{tr('验证码登录')}</button><button type="button" className="link-button" onClick={() => { setMode('reset'); setMessage(''); }}>{tr('忘记密码')}</button><button type="button" className="link-button" onClick={() => { setMode(mode === 'register' ? 'login' : 'register'); setMessage(''); setCode(''); }}>{mode === 'register' ? tr('返回登录') : tr('创建账户')}</button><p className="auth-legal"><a href="/privacy">{tr('隐私政策')}</a><a href="/terms">{tr('服务条款')}</a></p></form></main>;
-}
-
-function Topbar({ entitlement, onLogout, onPanel, isAdmin, serviceStatus }: { entitlement: Entitlement | null; onLogout: () => void; onPanel: (panel: Panel) => void; isAdmin: boolean; serviceStatus: ServiceStatus }) {
-  const [menuOpen, setMenuOpen] = useState(false);
-  const statusLabel = serviceStatus === 'checking' ? tr('检查服务中') : serviceStatus === 'online' ? tr('实时服务正常') : tr('实时服务异常');
-  const openPanel = (next: Panel) => { onPanel(next); setMenuOpen(false); };
-  return <header className="topbar"><div className="wordmark"><span className="brand-mark small">L</span><strong>LinguaFlow</strong></div><div className="topbar-actions"><div className="desktop-nav"><LanguageToggle /><button className="topbar-link" onClick={() => onPanel('transcripts')}>{tr('字幕库')}</button><button className="topbar-link" onClick={() => onPanel('glossary')}>{tr('术语库')}</button><button className="topbar-link" onClick={() => onPanel('pricing')}>{tr('会员')}</button><button className="topbar-link" onClick={() => onPanel('account')}>{tr('账户')}</button>{isAdmin && <button className="topbar-link" onClick={() => onPanel('admin')}>{tr('后台')}</button>}</div><div className="mobile-menu-wrap"><button className="mobile-menu-button" aria-expanded={menuOpen} aria-haspopup="menu" onClick={() => setMenuOpen((open) => !open)}>{tr('菜单')}</button>{menuOpen && <div className="mobile-menu" role="menu"><LanguageToggle /><button onClick={() => openPanel('transcripts')} role="menuitem">{tr('字幕库')}</button><button onClick={() => openPanel('glossary')} role="menuitem">{tr('术语库')}</button><button onClick={() => openPanel('pricing')} role="menuitem">{tr('会员')}</button><button onClick={() => openPanel('account')} role="menuitem">{tr('账户')}</button>{isAdmin && <button onClick={() => openPanel('admin')} role="menuitem">{tr('后台')}</button>}</div>}</div><span className={`status-pill ${serviceStatus}`}><i />{statusLabel}</span>{entitlement && <span className="quota-pill">{entitlement.plan.toUpperCase()} · {entitlement.remainingSeconds === Number.MAX_SAFE_INTEGER ? '∞' : Math.ceil(entitlement.remainingSeconds / 60)} 分钟</span>}<button className="icon-button" onClick={onLogout} aria-label={tr('退出登录')} title={tr('退出登录')}>↪</button></div></header>;
+  return <main className="auth-layout"><section className="auth-pitch"><div className="brand-mark">L</div><p className="eyebrow">LINGUAFLOW</p><h1>{tr('让每一次对话，')}<br /><em>{tr('自然地抵达')}</em></h1><p>{tr('实时语音识别、翻译与字幕记录，适用于会议、课堂和跨语言交流。')}</p><div className="demo-card"><span>ZH · 00:18</span><strong>{tr('欢迎来到 LinguaFlow')}</strong><small>Welcome to LinguaFlow</small></div></section><form className="auth-card" onSubmit={submit}><div className="auth-card-header"><div className="menu-row"><ThemeToggle /><LanguageToggle className="secondary-button" /></div><h2>{mode === 'register' ? tr('创建账户') : mode === 'reset' ? tr('重置密码') : tr('登录 LinguaFlow')}</h2><p>{tr('继续使用你的实时翻译工作区')}</p></div><label>{tr('邮箱')}<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="you@example.com" autoComplete="email" /></label>{mode !== 'code_login' && <label>{mode === 'reset' ? tr('新密码') : tr('密码')}<span className="password-field"><input type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} placeholder={tr('至少 8 位字符')} autoComplete={mode === 'reset' || mode === 'register' ? 'new-password' : 'current-password'} /><button type="button" className="password-toggle" aria-label={showPassword ? tr('隐藏密码') : tr('显示密码')} onClick={() => setShowPassword((value) => !value)}>{showPassword ? tr('隐藏') : tr('显示')}</button></span></label>}{mode !== 'login' && <label>{tr('验证码')}<input ref={codeInput} value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" placeholder={tr('邮箱验证码')} required={mode !== 'register'} autoComplete="one-time-code" /></label>}{mode !== 'login' && <button type="button" className="link-button" disabled={cooldown > 0 || busy} onClick={() => void sendVerificationCode().catch((error) => setMessage(error.message))}>{cooldown > 0 ? `${cooldown} ${tr('秒后重发')}` : tr('发送验证码')}</button>}{message && <div className="form-message" role="alert">{message}</div>}<button className="primary-button" disabled={busy}>{busy ? tr('处理中…') : mode === 'login' ? tr('登录') : mode === 'register' ? tr('完成注册') : mode === 'reset' ? tr('重置密码') : tr('验证码登录')}</button><div className="auth-links"><button type="button" className="link-button" onClick={() => { setMode('code_login'); setMessage(''); }}>{tr('验证码登录')}</button><button type="button" className="link-button" onClick={() => { setMode('reset'); setMessage(''); }}>{tr('忘记密码')}</button><button type="button" className="link-button" onClick={() => { setMode(mode === 'register' ? 'login' : 'register'); setMessage(''); setCode(''); }}>{mode === 'register' ? tr('返回登录') : tr('创建账户')}</button></div><p className="auth-legal"><a href="/privacy">{tr('隐私政策')}</a><a href="/terms">{tr('服务条款')}</a></p></form></main>;
 }
 
 type GlossaryTerm = { id: string; source: string; target: string; pinned?: boolean };
@@ -298,36 +292,13 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   return <PanelShell title={tr('管理后台')} onClose={onClose} wide><div className="admin-stat-grid"><div><small>{tr('进行中的会话')}</small><strong>{activeSessions}</strong></div><div><small>{tr('用量汇总')}</small><strong>{totals.reduce((sum, item) => sum + item.seconds, 0) ? formatDuration(totals.reduce((sum, item) => sum + item.seconds, 0)) : tr('暂无用量。')}</strong></div></div>{totals.map((item) => <p className="panel-description" key={`${item.kind}-${item.source}`}>{item.kind === 'summary' ? tr('平台纪要') : tr('实时翻译')} · {item.source === 'addon' ? tr('加时包') : tr('套餐分钟')} · {formatDuration(item.seconds)}</p>)}<div className="term-form"><label>{tr('搜用户')}<input value={query} onChange={(event) => setQuery(event.target.value)} /></label><button className="secondary-button" onClick={() => void load()}>{tr('搜用户')}</button></div><div className="term-form"><label>{tr('套餐')}<select value={grantPlan} onChange={(event) => setGrantPlan(event.target.value)}><option value="plus">Plus</option><option value="pro">Pro</option><option value="ultra">Ultra</option><option value="free">Free</option></select></label><label>{tr('月数')}<input type="number" min="1" max="120" value={grantMonths} onChange={(event) => setGrantMonths(Math.min(120, Math.max(1, Number(event.target.value) || 1)))} /></label><label>{tr('加时包分钟')}<input type="number" min="1" value={grantMinutes} onChange={(event) => setGrantMinutes(Math.max(1, Number(event.target.value) || 1))} /></label></div><div className="panel-list">{users.map((user) => <div className="panel-list-item" key={user.id}><span><strong>{user.email}</strong><small>{(user.plan ?? 'free').toUpperCase()} · {tr('加时包')} {formatDuration(user.addonSeconds ?? 0)}</small></span><span className="list-item-actions"><button className="secondary-button" onClick={() => void grant(user.id)}>{tr('开通')}</button><button className="secondary-button" onClick={() => void grantAddon(user.id)}>{tr('增加加时包')}</button></span></div>)}</div><div className="term-form"><label>{tr('套餐')}<select value={plan} onChange={(event) => setPlan(event.target.value)}><option value="plus">Plus</option><option value="pro">Pro</option><option value="ultra">Ultra</option></select></label><label>{tr('月数')}<input type="number" min="1" max="120" value={months} onChange={(event) => setMonths(Math.min(120, Math.max(1, Number(event.target.value) || 1)))} /></label><label>{tr('加时包分钟')}<input type="number" min="0" value={addonMinutes} onChange={(event) => setAddonMinutes(Math.max(0, Number(event.target.value) || 0))} /></label><label>{tr('可兑换次数')}<input type="number" min="1" max="10000" value={maxRedemptions} onChange={(event) => setMaxRedemptions(Math.min(10000, Math.max(1, Number(event.target.value) || 1)))} /></label><label>{tr('有效天数')}<input type="number" min="1" max="3650" value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)} placeholder={tr('留空则不限')} /></label><label>{tr('生成数量')}<input type="number" min="1" max="100" value={count} onChange={(event) => setCount(Math.min(100, Math.max(1, Number(event.target.value) || 1)))} /></label><label>{tr('备注')}<input value={note} onChange={(event) => setNote(event.target.value)} /></label><button className="primary-button" onClick={() => void generate()} disabled={busy}>{busy ? tr('生成中…') : tr('生成激活码')}</button></div>{error && <div className="form-message" role="alert">{error}</div>}{codes.length > 0 && <div className="generated-codes"><div className="generated-codes-header"><span>已生成 {codes.length} 个</span><button className="link-button" onClick={() => void copyCodes()}>{tr('复制全部')}</button></div>{codes.map((code) => <code key={code}>{code}</code>)}</div>}<h3>{tr('激活码列表')}</h3><div className="panel-list">{savedCodes.map((code) => <div className="panel-list-item" key={code.id}><span><strong>{code.codePrefix}…</strong><small>{(code.plan ?? 'addon').toUpperCase()} · {code.months ?? 0} · {tr('兑换 {count} 次').replace('{count}', `${code.redemptionCount}/${code.maxRedemptions}`)}{code.expiresAt ? ` · ${tr('到期')} ${formatDate(code.expiresAt)}` : ''}{code.disabled ? ' · disabled' : ''}</small></span>{!code.disabled && <button className="danger-button" onClick={() => void disableCode(code.id)}>{tr('作废')}</button>}</div>)}</div><h3>{tr('进行中的会话')}</h3>{sessions.length === 0 && <p className="panel-description">{tr('没有进行中的会话。')}</p>}<div className="panel-list">{sessions.map((session) => <div className="panel-list-item" key={session.id}><span><strong>{session.email ?? session.id}</strong><small>{session.mode} · {session.status}</small></span><button className="danger-button" onClick={() => void terminate(session.id)}>{tr('终止')}</button></div>)}</div></PanelShell>;
 }
 
-function LanguageSelect({ label, value, options, onChange, disabled }: { label: string; value: string; options: Array<{ code: string; nativeName: string; englishName: string }>; onChange: (value: string) => void; disabled?: boolean }) {
-  return <label className="select-field"><span>{label}</span><select value={value} onChange={(event) => onChange(event.target.value)} disabled={disabled}>{options.map((option) => <option value={option.code} key={option.code}>{option.nativeName} · {option.code.toUpperCase()}</option>)}</select></label>;
-}
-
-type CaptionView = 'both' | 'translation' | 'source';
 const CAPTION_PAGE = 80;
 type ActiveSession = { id: string; mode: 'one_way' | 'two_way'; status: string; title: string | null; languageA: string; languageB: string | null; targetLanguage: string | null };
 
-function useCompactLayout() {
-  const query = '(max-width: 600px)';
-  const [compact, setCompact] = useState(() => window.matchMedia(query).matches);
-  useEffect(() => {
-    const media = window.matchMedia(query);
-    const onChange = () => setCompact(media.matches);
-    onChange();
-    media.addEventListener('change', onChange);
-    window.addEventListener('resize', onChange);
-    window.visualViewport?.addEventListener('resize', onChange);
-    return () => {
-      media.removeEventListener('change', onChange);
-      window.removeEventListener('resize', onChange);
-      window.visualViewport?.removeEventListener('resize', onChange);
-    };
-  }, []);
-  return compact;
-}
-
 function App() {
   useLang();
-  const compact = useCompactLayout();
+  useViewportHeight();
+  const phone = useMediaQuery(PHONE_QUERY);
   const [authenticated, setAuthenticated] = useState(Boolean(getToken()) && !isTokenExpired());
   const [entitlement, setEntitlement] = useState<Entitlement | null>(null);
   const [profile, setProfile] = useState<Profile | null>(null); const [panel, setPanel] = useState<Panel>('none');
@@ -335,7 +306,7 @@ function App() {
   const [languageA, setLanguageA] = useState(() => localStorage.getItem('linguaflow_lang_a') || 'ru'); const [languageB, setLanguageB] = useState(() => localStorage.getItem('linguaflow_lang_b') || 'zh');
   const [glossaryId, setGlossaryId] = useState(() => localStorage.getItem('linguaflow_glossary') || ''); const [glossaryChoices, setGlossaryChoices] = useState<Glossary[]>([]);
   const [languages, setLanguages] = useState<Array<{ code: string; nativeName: string; englishName: string }>>([]);
-  const [audioSource, setAudioSource] = useState<AudioSource>('microphone'); const [recordAudio, setRecordAudio] = useState(() => localStorage.getItem('linguaflow_record_audio') !== '0'); const [dockOpen, setDockOpen] = useState(false); const [showJump, setShowJump] = useState(false); const dockRef = useRef<HTMLElement>(null); const stageRef = useRef<HTMLDivElement>(null); const followLatest = useRef(true); const scrolling = useRef(false); const seenInterim = useRef(new Set<number>()); const freshCommitted = useRef(new Set<number>()); const captionFold = useRef(createCaptionFold()); const captionLimitRef = useRef(CAPTION_PAGE); const windowEndRef = useRef(0); const scrollAnchor = useRef(0);
+  const [audioSource, setAudioSource] = useState<AudioSource>('microphone'); const [recordAudio, setRecordAudio] = useState(() => localStorage.getItem('linguaflow_record_audio') !== '0'); const [dockOpen, setDockOpen] = useState(false); const [captionOpen, setCaptionOpen] = useState(false); const [showJump, setShowJump] = useState(false); const stageRef = useRef<HTMLDivElement>(null); const followLatest = useRef(true); const scrolling = useRef(false); const seenInterim = useRef(new Set<number>()); const freshCommitted = useRef(new Set<number>()); const captionFold = useRef(createCaptionFold()); const captionLimitRef = useRef(CAPTION_PAGE); const windowEndRef = useRef(0); const scrollAnchor = useRef(0);
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>('idle'); const [serviceStatus, setServiceStatus] = useState<ServiceStatus>('checking'); const [segments, setSegments] = useState<Segment[]>([]); const [error, setError] = useState('');
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null); const [endedTranscriptId, setEndedTranscriptId] = useState<string | null>(null); const [focusTranscriptId, setFocusTranscriptId] = useState<string | null>(null);
   const [recordAck, setRecordAck] = useState(() => localStorage.getItem('linguaflow_record_ack') === '1');
@@ -353,41 +324,6 @@ function App() {
   useEffect(() => { const expire = () => { void stop(); clearToken(); setAuthenticated(false); }; window.addEventListener('linguaflow:auth-expired', expire); const timer = window.setInterval(() => { if (getToken() && isTokenExpired()) expire(); }, 30_000); return () => { window.removeEventListener('linguaflow:auth-expired', expire); window.clearInterval(timer); }; }, []);
   useEffect(() => { let alive = true; async function check() { try { const response = await fetch((import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? 'http://localhost:3000' : '')) + '/health'); if (alive) setServiceStatus(response.ok ? 'online' : 'offline'); } catch { if (alive) setServiceStatus('offline'); } } void check(); const timer = window.setInterval(() => void check(), 30_000); return () => { alive = false; window.clearInterval(timer); }; }, []);
 
-  useLayoutEffect(() => {
-    const dock = dockRef.current;
-    if (!dock) {
-      document.documentElement.style.removeProperty('--dock-height');
-      document.documentElement.style.removeProperty('--app-height');
-      document.documentElement.style.removeProperty('--sheet-overlap');
-      return;
-    }
-    const apply = () => {
-      document.documentElement.style.setProperty('--dock-height', `${dock.offsetHeight}px`);
-      const viewport = window.visualViewport?.height ?? window.innerHeight;
-      document.documentElement.style.setProperty('--app-height', `${viewport}px`);
-      const sheet = dock.querySelector('.dock-sheet');
-      const stage = stageRef.current;
-      if (sheet && stage) {
-        const overlap = Math.max(0, Math.round(stage.getBoundingClientRect().bottom - sheet.getBoundingClientRect().top + 12));
-        document.documentElement.style.setProperty('--sheet-overlap', `${overlap}px`);
-      } else document.documentElement.style.removeProperty('--sheet-overlap');
-    };
-    apply();
-    const observer = 'ResizeObserver' in window ? new ResizeObserver(apply) : null;
-    observer?.observe(dock);
-    const sheet = dock.querySelector('.dock-sheet');
-    if (sheet) observer?.observe(sheet);
-    window.addEventListener('resize', apply);
-    window.visualViewport?.addEventListener('resize', apply);
-    return () => {
-      observer?.disconnect();
-      window.removeEventListener('resize', apply);
-      window.visualViewport?.removeEventListener('resize', apply);
-      document.documentElement.style.removeProperty('--dock-height');
-      document.documentElement.style.removeProperty('--app-height');
-      document.documentElement.style.removeProperty('--sheet-overlap');
-    };
-  }, [authenticated, dockOpen, sessionStatus, compact]);
   useEffect(() => { document.documentElement.lang = getLang() === 'en' ? 'en' : 'zh-CN'; document.title = getLang() === 'en' ? 'LinguaFlow · Live Translation' : 'LinguaFlow · 实时双语翻译'; if (authenticated) { api<Entitlement>('/v1/me/entitlement').then(setEntitlement).catch(() => setAuthenticated(false)); api<Profile>('/v1/me/profile').then(setProfile).catch(() => undefined); api<Array<{ code: string; nativeName: string; englishName: string }>>('/v1/me/languages').then((items) => { setLanguages(items); if (!items.some((item) => item.code === languageA)) setLanguageA(items[0]?.code ?? 'zh'); if (!items.some((item) => item.code === languageB)) setLanguageB(items[1]?.code ?? items[0]?.code ?? 'en'); }).catch(() => undefined); } }, [authenticated]);
   useEffect(() => { authToken.current = getToken(); }, [authenticated]);
   useEffect(() => { localStorage.setItem('linguaflow_lang_a', languageA); localStorage.setItem('linguaflow_lang_b', languageB); }, [languageA, languageB]);
@@ -810,7 +746,118 @@ function App() {
   if (liveToken) return <LivePage token={decodeURIComponent(liveToken)} />;
   if (!authenticated && path !== '/') return <MarketingPage />;
   if (!authenticated) return <AuthScreen onLogin={() => setAuthenticated(true)} />;
-  return <div className="app-shell"><Topbar entitlement={entitlement} onLogout={logout} onPanel={setPanel} isAdmin={profile?.role === 'admin'} serviceStatus={serviceStatus} /><main className="workspace"><section className="stage"><div ref={stageRef} className={`subtitle-stage caption-${captionSize}${!compact && (segments.length > 0 || running || sessionStatus === 'reconnecting') ? ' with-toolbar' : ''}`} aria-live="polite" aria-relevant="additions text" onScroll={onStageScroll}>{segments.length === 0 && sessionStatus === 'idle' && <div className="empty-state"><div className="empty-icon">◌</div><h2>{tr('准备好开始翻译')}</h2><p>{tr('选择语言并点击下方按钮，说话时字幕会实时出现在这里。')}</p></div>}{segments.length === 0 && sessionStatus === 'opening' && <div className="listening-indicator" role="status"><i />{tr('正在打开麦克风…')}<p>{tr('请允许浏览器使用麦克风，允许后即可开始说话。')}</p></div>}{segments.length === 0 && sessionStatus === 'connecting' && <div className="listening-indicator" role="status"><i />{tr('正在连接翻译…')}</div>}{segments.length === 0 && sessionStatus === 'reconnecting' && <div className="listening-indicator" role="status"><i />{tr('正在恢复…')}</div>}{segments.length > 0 && <div className="subtitle-spacer" />}{hiddenCaptions > 0 && <button type="button" className="earlier-captions" onClick={showEarlierCaptions}>{tr('更早的字幕')}</button>}{visibleCaptions.map((segment, index) => { const position = hiddenCaptions + index; const spoken = (segment.language ?? '').toLowerCase().split('-')[0]; const right = mode === 'two_way' && spoken && spoken === languageB.toLowerCase().split('-')[0]; const big = captionView === 'source' ? (segment.source || segment.translation) : (segment.translation || segment.source); const small = captionView === 'both' && segment.translation && segment.source ? segment.source : ''; const speakerName = segment.speaker ? speakerNames[segment.speaker] ?? `${tr('说话人')} ${segment.speaker}` : ''; const meta = [segment.language?.toUpperCase() ?? ''].filter(Boolean).join(' · '); return <article className={`subtitle-segment ${mode === 'two_way' ? 'chat-bubble' : ''} ${right ? 'right' : ''} ${position === segments.length - 1 ? 'current' : ''} ${segment.interim ? 'interim' : ''}${captionEnterClass(position, Boolean(segment.interim), segments.length)}`} key={`line-${position}`}>{speakerName && <button type="button" className="speaker-label speaker-rename" onClick={() => { setNamingSpeaker(segment.speaker ?? null); setSpeakerDraft(speakerNames[segment.speaker ?? ''] ?? segment.speaker ?? ''); }}>{speakerName}</button>}{meta && <span className="speaker-label">{meta}</span>}<div className="translation-line">{big || '…'}</div>{small && <div className="source-line">{small}</div>}</article>; })}{segments.length === 0 && running && <div className="listening-indicator" role="status"><i />{tr('正在聆听')}</div>}</div>{!compact && (segments.length > 0 || running || sessionStatus === 'reconnecting') && <div className="caption-toolbar"><span>{tr('字幕显示')}</span><button type="button" className={captionView === 'both' ? 'active' : ''} onClick={() => setCaptionView('both')}>{tr('双语')}</button><button type="button" className={captionView === 'translation' ? 'active' : ''} onClick={() => setCaptionView('translation')}>{tr('译文')}</button><button type="button" className={captionView === 'source' ? 'active' : ''} onClick={() => setCaptionView('source')}>{tr('原文')}</button><button type="button" onClick={() => void copyLive()}>{tr('复制字幕')}</button><button type="button" onClick={exportLive}>{tr('导出文本')}</button></div>}{namingSpeaker && <form className="speaker-rename-form" onSubmit={(event) => { event.preventDefault(); renameLiveSpeaker(); }}><label>{tr('改名为')}<input value={speakerDraft} onChange={(event) => setSpeakerDraft(event.target.value)} aria-label={tr('说话人名称')} /></label><button className="secondary-button" type="submit">{tr('保存')}</button><button type="button" className="secondary-button" onClick={() => setNamingSpeaker(null)}>{tr('取消')}</button></form>}{liveNotice && <p className="live-notice" role="status">{liveNotice}</p>}{showJump && <button type="button" className="jump-latest" onClick={jumpLatest}>{tr('回到最新')}</button>}</section><aside ref={dockRef} className={`control-dock ${dockOpen ? 'open' : 'collapsed'}${compact ? ' compact' : ''}`}>{dockOpen && <div className={compact ? 'dock-sheet' : 'dock-panel'}><div className="dock-settings"><div className="dock-tabs"><button className={mode === 'one_way' ? 'active' : ''} onClick={() => !busySession && setMode('one_way')} disabled={busySession}>{tr('课堂模式')}</button><button className={mode === 'two_way' ? 'active' : ''} onClick={() => !busySession && setMode('two_way')} disabled={busySession}>{tr('对话模式')}</button></div><div className="language-row"><LanguageSelect label={tr('原语言')} value={languageA} options={languages} onChange={setLanguageA} disabled={busySession} /><span className="swap">{mode === 'one_way' ? '→' : '↔'}</span><LanguageSelect label={tr(mode === 'one_way' ? '翻译为' : '第二语言')} value={languageB} options={languages} onChange={setLanguageB} disabled={busySession} /></div>{sameLanguage && <p className="audio-hint">{tr('源语言和目标语言不能相同。')}</p>}<label className="audio-source"><span>{tr('选择术语库')}</span><select value={glossaryId} onChange={(event) => setGlossaryId(event.target.value)} disabled={busySession}><option value="">{tr('不使用术语库')}</option>{glossaryChoices.map((item) => <option value={item.id} key={item.id}>{glossaryOptionLabel(item)}</option>)}</select></label><label className="audio-source"><span>{tr('音频来源')}</span><select value={audioSource} onChange={(event) => setAudioSource(event.target.value as AudioSource)} disabled={busySession}><option value="microphone">{tr('麦克风')}</option><option value="system">{tr('系统声音 / 屏幕共享')}</option></select></label>{audioSource === 'microphone' && <label className="audio-source"><span>{tr('选择麦克风')}</span><select value={micId} onChange={(event) => setMicId(event.target.value)} disabled={busySession}><option value="">{tr('系统默认麦克风')}</option>{mics.map((mic) => <option value={mic.id} key={mic.id}>{mic.label}</option>)}</select></label>}{audioSource === 'system' && <p className="audio-hint">{tr('共享窗口时请勾选“共享声音”。')}</p>}{glossaryId && (glossaryUsed > 0 || !glossaryAligned || glossaryDropped > 0) && <p className="audio-hint">{glossaryUsed > 0 && <>{tr('本次会注入 {count} 条。').replace('{count}', String(glossaryUsed))} </>}{!glossaryAligned && <>{tr('这个术语库是 {glossary}，这场是 {session}。译法仍按词库方向注入。').replace('{glossary}', glossaryPairLabel).replace('{session}', sessionPairLabel)} </>}{glossaryDropped > 0 && <>{tr('有 {count} 条术语超出上限，本次不会注入。').replace('{count}', String(glossaryDropped))}{glossaryDroppedTerms.length ? ` ${glossaryDroppedTerms.slice(0, 6).join('、')}` : ''} {tr('可把必须使用的词标为优先。')}</>}</p>}<div className="stage-tools"><span>{tr('字号')}</span><button type="button" className={captionSize === 'sm' ? 'active' : ''} onClick={() => setCaptionSize('sm')}>{tr('小')}</button><button type="button" className={captionSize === 'md' ? 'active' : ''} onClick={() => setCaptionSize('md')}>{tr('中')}</button><button type="button" className={captionSize === 'lg' ? 'active' : ''} onClick={() => setCaptionSize('lg')}>{tr('大')}</button><button type="button" onClick={() => void toggleFullscreen()}>{fullscreen ? tr('退出全屏') : tr('全屏')}</button></div></div>{compact && <>{(segments.length > 0 || running || sessionStatus === 'reconnecting') && <div className="caption-toolbar"><span>{tr('字幕显示')}</span><button type="button" className={captionView === 'both' ? 'active' : ''} onClick={() => setCaptionView('both')}>{tr('双语')}</button><button type="button" className={captionView === 'translation' ? 'active' : ''} onClick={() => setCaptionView('translation')}>{tr('译文')}</button><button type="button" className={captionView === 'source' ? 'active' : ''} onClick={() => setCaptionView('source')}>{tr('原文')}</button><button type="button" onClick={() => void copyLive()}>{tr('复制字幕')}</button><button type="button" onClick={exportLive}>{tr('导出文本')}</button></div>}<label className="audio-source session-title-field"><span>{tr('这场翻译的名称')}</span><input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value.slice(0, 120))} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} disabled={sessionStatus === 'stopping'} /></label><div className="dock-sheet-actions">{liveSessionId && <AudienceLink sessionId={liveSessionId} mode={mode} />}<label className="record-toggle" title={tr('保存本次语音')}><input type="checkbox" checked={recordAudio} onChange={(event) => setRecordAudio(event.target.checked)} disabled={busySession} aria-label={tr('保存本次语音')} /><span>{tr('保存本次语音')}</span></label>{running && <button type="button" className="dock-toggle" onClick={togglePause} title={tr('暂停收音，计时继续')}>{paused ? tr('继续收音') : tr('暂停收音')}</button>}{paused && <span className="audio-hint">{tr('暂停收音，计时继续')}</span>}<span className={`direction-badge${running && remainingSeconds !== null && remainingSeconds <= 60 ? ' time-warning' : ''}`}>{currentLabel}{running && remainingSeconds !== null ? ` · ${remainingSeconds <= 60 ? tr('即将结束') : tr('剩余')} ${formatRemain(remainingSeconds)}` : ''}</span></div></>}</div>}{showGuide && sessionStatus === 'idle' && !conflictSession && <FirstRun pair={currentLabel} plan={entitlement?.plan.toUpperCase() ?? 'FREE'} minutesLeft={entitlement ? (entitlement.remainingSeconds >= Number.MAX_SAFE_INTEGER / 2 ? tr('无限') : `${Math.ceil(entitlement.remainingSeconds / 60)} ${tr('分钟')}`) : '…'} onOpen={() => { if (!compact) setDockOpen(true); }} onDone={() => setShowGuide(false)} />}{conflictSession && sessionStatus === 'idle' && <div className="record-notice" role="status"><p>{tr('上一场翻译还在占用额度。')}</p><button type="button" className="primary-button" onClick={() => void resumeConflict()}>{tr('恢复这场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(false)}>{tr('结束上一场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(true)}>{tr('结束上一场并开始')}</button></div>}{!recordAck && recordAudio && sessionStatus === 'idle' && <div className="record-notice" role="status"><p>{tr('录音默认开启。本次语音会保存到你的字幕库，只有你可以回放和删除。如果不需要保存，请先关闭「保存本次语音」。')}</p><button type="button" className="secondary-button" onClick={() => { localStorage.setItem('linguaflow_record_ack', '1'); setRecordAck(true); }}>{tr('知道了')}</button></div>}{endedTranscriptId && sessionStatus === 'idle' && <div className="session-saved" role="status"><span>{tr('本次记录已保存。')}</span><button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(endedTranscriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button><button type="button" className="link-button" onClick={() => setEndedTranscriptId(null)}>{tr('关闭')}</button></div>}{running && remainingSeconds !== null && remainingSeconds <= 60 && <div className="error-banner time-warning-banner" role="status">{tr('本次会话即将结束，剩余')} {formatRemain(remainingSeconds)}</div>}{closePrompt && <form className="close-title" onSubmit={(event) => { event.preventDefault(); confirmClose(); }}><label>{tr('这场翻译的名称')}<input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} autoFocus /></label><button type="button" className="link-button" onClick={() => setClosePrompt(false)}>{tr('继续翻译')}</button></form>}{error && <div className="error-banner" role="alert">{error}</div>}{!compact && <label className="audio-source session-title-field"><span>{tr('这场翻译的名称')}</span><input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value.slice(0, 120))} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} disabled={sessionStatus === 'stopping'} /></label>}<div className="dock-bar">{!compact && liveSessionId && <AudienceLink sessionId={liveSessionId} mode={mode} />}<button type="button" className="dock-toggle" aria-expanded={dockOpen} onClick={() => setDockOpen((open) => !open)}>{dockOpen ? tr('收起') : compact ? tr('更多') : tr('设置')}</button>{!compact && <label className="record-toggle" title={tr('保存本次语音')}><input type="checkbox" checked={recordAudio} onChange={(event) => setRecordAudio(event.target.checked)} disabled={busySession} aria-label={tr('保存本次语音')} /><span>{tr('保存本次语音')}</span></label>}{!compact && running && <button type="button" className="dock-toggle" onClick={togglePause} title={tr('暂停收音，计时继续')}>{paused ? tr('继续收音') : tr('暂停收音')}</button>}{!compact && paused && <span className="audio-hint">{tr('暂停收音，计时继续')}</span>}<button className={`record-button ${running ? 'recording' : ''} ${sessionStatus === 'opening' || sessionStatus === 'connecting' || sessionStatus === 'reconnecting' ? 'arming' : ''}`} disabled={sessionStatus === 'stopping'} onClick={() => void (closePrompt ? confirmClose() : sessionStatus === 'idle' ? start() : requestClose())}><span>{running ? '■' : '●'}</span><span className="record-label">{sessionStatus === 'opening' ? tr('正在打开麦克风…') : sessionStatus === 'connecting' ? tr('连接中…') : sessionStatus === 'reconnecting' ? tr('正在恢复…') : sessionStatus === 'stopping' ? tr('结束中…') : closePrompt ? tr('保存并结束') : running ? tr('结束翻译') : tr('开始翻译')}</span></button>{!compact && <span className={`direction-badge${running && remainingSeconds !== null && remainingSeconds <= 60 ? ' time-warning' : ''}`}>{currentLabel}{running && remainingSeconds !== null ? ` · ${remainingSeconds <= 60 ? tr('即将结束') : tr('剩余')} ${formatRemain(remainingSeconds)}` : ''}</span>}</div>{dockOpen && !compact && <div className="dock-foot"><span>{tr('音频：')}{audioSource === 'system' ? tr('系统声音') : tr('麦克风')}</span><span>{entitlement ? `${PLANS[entitlement.plan].label} ${tr('额度')}` : ''}</span></div>}</aside></main>{panel === 'transcripts' && <TranscriptPanel focusId={focusTranscriptId} onClose={() => { setPanel('none'); setFocusTranscriptId(null); }} />}{panel === 'glossary' && <GlossaryPanel languageA={languageA} languageB={languageB} activeId={glossaryId} onActive={setGlossaryId} onList={setGlossaryChoices} onClose={() => setPanel('none')} />}{panel === 'pricing' && <PricingPanel entitlement={entitlement} onRefresh={() => api<Entitlement>('/v1/me/entitlement').then(setEntitlement)} onClose={() => setPanel('none')} />}{panel === 'admin' && <AdminPanel onClose={() => setPanel('none')} />}{panel === 'account' && <AccountPanel email={profile?.email ?? ''} displayName={profile?.displayName ?? ''} onProfile={() => void reloadProfile()} onClose={() => setPanel('none')} />}</div>;
+  const captionsVisible = segments.length > 0 || running || sessionStatus === 'reconnecting';
+  const timeWarning = running && remainingSeconds !== null && remainingSeconds <= 60;
+  const remainingLabel = running && remainingSeconds !== null ? ` · ${remainingSeconds <= 60 ? tr('即将结束') : tr('剩余')} ${formatRemain(remainingSeconds)}` : '';
+  const glossaryHint = glossaryId && (glossaryUsed > 0 || !glossaryAligned || glossaryDropped > 0)
+    ? <p className="audio-hint">
+        {glossaryUsed > 0 && <>{tr('本次会注入 {count} 条。').replace('{count}', String(glossaryUsed))} </>}
+        {!glossaryAligned && <>{tr('这个术语库是 {glossary}，这场是 {session}。译法仍按词库方向注入。').replace('{glossary}', glossaryPairLabel).replace('{session}', sessionPairLabel)} </>}
+        {glossaryDropped > 0 && <>{tr('有 {count} 条术语超出上限，本次不会注入。').replace('{count}', String(glossaryDropped))}{glossaryDroppedTerms.length ? ` ${glossaryDroppedTerms.slice(0, 6).join('、')}` : ''} {tr('可把必须使用的词标为优先。')}</>}
+      </p>
+    : null;
+
+  /* Highest priority first. SessionNotices renders only the first one. */
+  const notices: Array<Notice | null> = [
+    closePrompt ? { id: 'close', node: <form className="close-title" onSubmit={(event) => { event.preventDefault(); confirmClose(); }}><label>{tr('这场翻译的名称')}<input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} autoFocus /></label><button className="primary-button" type="submit">{tr('保存并结束')}</button><button type="button" className="link-button" onClick={() => setClosePrompt(false)}>{tr('继续翻译')}</button></form> } : null,
+    namingSpeaker ? { id: 'speaker', node: <form className="speaker-rename-form" onSubmit={(event) => { event.preventDefault(); renameLiveSpeaker(); }}><label>{tr('改名为')}<input value={speakerDraft} onChange={(event) => setSpeakerDraft(event.target.value)} aria-label={tr('说话人名称')} autoFocus /></label><button className="secondary-button" type="submit">{tr('保存')}</button><button type="button" className="secondary-button" onClick={() => setNamingSpeaker(null)}>{tr('取消')}</button></form> } : null,
+    error ? { id: 'error', node: <div className="error-banner" role="alert">{error}</div> } : null,
+    timeWarning ? { id: 'time', node: <div className="error-banner time-warning-banner" role="status">{tr('本次会话即将结束，剩余')} {formatRemain(remainingSeconds ?? 0)}</div> } : null,
+    conflictSession && sessionStatus === 'idle' ? { id: 'conflict', node: <div className="record-notice" role="status"><p>{tr('上一场翻译还在占用额度。')}</p><button type="button" className="primary-button" onClick={() => void resumeConflict()}>{tr('恢复这场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(false)}>{tr('结束上一场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(true)}>{tr('结束上一场并开始')}</button></div> } : null,
+    endedTranscriptId && sessionStatus === 'idle' ? { id: 'saved', node: <div className="session-saved" role="status"><span>{tr('本次记录已保存。')}</span><button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(endedTranscriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button><button type="button" className="link-button" onClick={() => setEndedTranscriptId(null)}>{tr('关闭')}</button></div> } : null,
+    !recordAck && recordAudio && sessionStatus === 'idle' ? { id: 'record-ack', node: <div className="record-notice" role="status"><p>{tr('录音默认开启。本次语音会保存到你的字幕库，只有你可以回放和删除。如果不需要保存，请先关闭「保存本次语音」。')}</p><button type="button" className="secondary-button" onClick={() => { localStorage.setItem('linguaflow_record_ack', '1'); setRecordAck(true); }}>{tr('知道了')}</button></div> } : null,
+    showGuide && sessionStatus === 'idle' && !conflictSession ? { id: 'guide', node: <FirstRun pair={currentLabel} plan={entitlement?.plan.toUpperCase() ?? 'FREE'} minutesLeft={entitlement ? (entitlement.remainingSeconds >= Number.MAX_SAFE_INTEGER / 2 ? tr('无限') : `${Math.ceil(entitlement.remainingSeconds / 60)} ${tr('分钟')}`) : '…'} onOpen={() => { if (!phone) setDockOpen(true); }} onDone={() => setShowGuide(false)} /> } : null,
+    liveNotice ? { id: 'live-notice', node: <p className="live-notice" role="status">{liveNotice}</p> } : null
+  ];
+
+  return <div className="app-shell">
+    <Topbar
+      entitlement={entitlement}
+      serviceStatus={serviceStatus}
+      isAdmin={profile?.role === 'admin'}
+      live={phone && (running || sessionStatus === 'reconnecting') ? { label: currentLabel, remaining: remainingSeconds !== null ? formatRemain(remainingSeconds) : '', warning: Boolean(timeWarning), paused } : null}
+      onPanel={setPanel}
+      onLogout={() => void logout()}
+    />
+    <main className="workspace">
+      <section className="stage">
+        {!phone && captionsVisible && <CaptionToolbar view={captionView} onView={setCaptionView} onCopy={() => void copyLive()} onExport={exportLive} />}
+        <CaptionStage
+          stageRef={stageRef}
+          segments={segments}
+          visibleCaptions={visibleCaptions}
+          hiddenCaptions={hiddenCaptions}
+          captionSize={captionSize}
+          captionView={captionView}
+          sessionStatus={sessionStatus}
+          twoWay={mode === 'two_way'}
+          languageB={languageB}
+          speakerNames={speakerNames}
+          withToolbar={!phone && captionsVisible}
+          enterClass={captionEnterClass}
+          onScroll={onStageScroll}
+          onShowEarlier={showEarlierCaptions}
+          onRenameSpeaker={(speaker) => { setNamingSpeaker(speaker); setSpeakerDraft(speakerNames[speaker ?? ''] ?? speaker ?? ''); }}
+        />
+        {showJump && <button type="button" className="jump-latest" onClick={jumpLatest}>{tr('回到最新')}</button>}
+      </section>
+      <SessionNotices notices={notices} />
+      <ControlDock
+        phone={phone}
+        sessionStatus={sessionStatus}
+        busySession={busySession}
+        running={running}
+        paused={paused}
+        closePrompt={closePrompt}
+        dockOpen={dockOpen}
+        captionOpen={captionOpen}
+        mode={mode}
+        languages={languages}
+        languageA={languageA}
+        languageB={languageB}
+        sameLanguage={sameLanguage}
+        glossaryId={glossaryId}
+        glossaryChoices={glossaryChoices}
+        glossaryHint={glossaryHint}
+        audioSource={audioSource}
+        mics={mics}
+        micId={micId}
+        recordAudio={recordAudio}
+        sessionTitle={sessionTitle}
+        liveSessionId={liveSessionId}
+        captionView={captionView}
+        captionSize={captionSize}
+        fullscreen={fullscreen}
+        directionLabel={currentLabel}
+        remainingLabel={remainingLabel}
+        timeWarning={Boolean(timeWarning)}
+        hasCaptions={segments.length > 0}
+        planLabel={entitlement ? `${PLANS[entitlement.plan].label} ${tr('额度')}` : ''}
+        onDockOpen={(open) => { setDockOpen(open); if (open) setCaptionOpen(false); }}
+        onCaptionOpen={(open) => { setCaptionOpen(open); if (open) setDockOpen(false); }}
+        onMode={setMode}
+        onLanguageA={setLanguageA}
+        onLanguageB={setLanguageB}
+        onGlossary={setGlossaryId}
+        onAudioSource={setAudioSource}
+        onMic={setMicId}
+        onRecordAudio={setRecordAudio}
+        onSessionTitle={setSessionTitle}
+        onCaptionView={setCaptionView}
+        onCaptionSize={setCaptionSize}
+        onFullscreen={() => void toggleFullscreen()}
+        onPause={togglePause}
+        onPrimary={() => void (closePrompt ? confirmClose() : sessionStatus === 'idle' ? start() : requestClose())}
+        onCopy={() => void copyLive()}
+        onExport={exportLive}
+      />
+    </main>
+    {panel === 'transcripts' && <TranscriptPanel focusId={focusTranscriptId} onClose={() => { setPanel('none'); setFocusTranscriptId(null); }} />}
+    {panel === 'glossary' && <GlossaryPanel languageA={languageA} languageB={languageB} activeId={glossaryId} onActive={setGlossaryId} onList={setGlossaryChoices} onClose={() => setPanel('none')} />}
+    {panel === 'pricing' && <PricingPanel entitlement={entitlement} onRefresh={() => api<Entitlement>('/v1/me/entitlement').then(setEntitlement)} onClose={() => setPanel('none')} />}
+    {panel === 'admin' && <AdminPanel onClose={() => setPanel('none')} />}
+    {panel === 'account' && <AccountPanel email={profile?.email ?? ''} displayName={profile?.displayName ?? ''} onProfile={() => void reloadProfile()} onClose={() => setPanel('none')} />}
+  </div>;
 }
 
 createRoot(document.getElementById('root')!).render(<StrictMode><App /></StrictMode>);
