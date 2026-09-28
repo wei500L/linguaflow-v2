@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, type TranscriptToken } from '@linguaflow/shared';
 import { apiOrigin } from './lib/api';
+import { lockProgrammaticScroll, nudgeToBottom } from './lib/follow-scroll';
 import { tr, useLang } from './lib/i18n';
 import { LanguageToggle } from './language-toggle';
 
@@ -224,9 +225,7 @@ export function LivePage({ token }: { token: string }) {
     if (!node) return;
     if (followLatest.current) {
       scrollAnchor.current = 0;
-      scrolling.current = true;
-      node.scrollTop = node.scrollHeight;
-      requestAnimationFrame(() => { scrolling.current = false; });
+      nudgeToBottom(node, scrolling);
       return;
     }
     const before = scrollAnchor.current;
@@ -236,7 +235,7 @@ export function LivePage({ token }: { token: string }) {
     if (delta <= 0) return;
     scrolling.current = true;
     node.scrollTop += delta;
-    requestAnimationFrame(() => { scrolling.current = false; });
+    lockProgrammaticScroll(scrolling);
   }, [segments, reading, captionLimit, windowEnd]);
 
   function onStackScroll() {
@@ -265,9 +264,7 @@ export function LivePage({ token }: { token: string }) {
     if (captionLimitRef.current !== 80) { captionLimitRef.current = 80; setCaptionLimit(80); }
     const node = stackRef.current;
     if (!node) return;
-    scrolling.current = true;
-    node.scrollTop = node.scrollHeight;
-    requestAnimationFrame(() => { scrolling.current = false; });
+    nudgeToBottom(node, scrolling);
   }
   function chooseView(next: CaptionView) {
     viewChosen.current = true;
@@ -312,7 +309,7 @@ export function LivePage({ token }: { token: string }) {
           const small = view === 'both' && segment.translation && segment.source ? segment.source : '';
           const speakerName = segment.speaker ? speakerNames[segment.speaker] ?? `${tr('说话人')} ${segment.speaker}` : '';
           const current = position === segments.length - 1;
-          return <article className={`projection-line${current ? ' current' : ''}${segment.interim ? ' interim' : ''}`} key={segment.interim ? 'live' : `line-${position}`}>
+          return <article className={`projection-line${current ? ' current' : ''}${segment.interim ? ' interim' : ''}`} key={`line-${position}`}>
             {speakerName && <span>{speakerName}</span>}
             <p>{big || '…'}</p>
             {small && <small>{small}</small>}
