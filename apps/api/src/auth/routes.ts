@@ -2,8 +2,10 @@ import type { FastifyInstance } from 'fastify';
 import { z } from 'zod';
 import { checkLoginAllowed, createUser, findUser, recordLoginResult, resetPassword, sendCode, verifyCode, verifyPassword } from './service.js';
 
-const emailSchema = z.object({ email: z.string().email() });
-const passwordSchema = emailSchema.extend({ password: z.string().min(8) });
+/* Phones often submit a trailing space from autofill or the keyboard.
+   Zod rejects that as an invalid email before the address is normalized. */
+const emailSchema = z.object({ email: z.string().trim().email() });
+const passwordSchema = emailSchema.extend({ password: z.string().trim().min(8) });
 
 export async function authRoutes(app: FastifyInstance) {
   app.get('/v1/auth/config', async () => ({ passwordLoginEnabled: true, codeLoginEnabled: true, oauthEnabled: false }));

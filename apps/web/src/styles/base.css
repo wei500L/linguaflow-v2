@@ -12,7 +12,10 @@ html {
 
 body {
   margin: 0;
-  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Display', 'SF Pro Text', 'Helvetica Neue', sans-serif;
+  /* Latin and Cyrillic come from the system UI face; the CJK fallbacks keep Chinese
+     weights consistent on Android and Windows instead of the browser default. */
+  font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', Roboto, 'Helvetica Neue',
+    'PingFang SC', 'Hiragino Sans GB', 'Noto Sans SC', 'Source Han Sans SC', 'Microsoft YaHei', sans-serif;
   font-size: var(--text-base);
   color: var(--text);
   background: var(--bg);
@@ -40,7 +43,11 @@ textarea {
   color: inherit;
 }
 
-button {
+button,
+select,
+summary {
+  /* A double-tap zoom delay on phones swallows the first tap on Start. */
+  touch-action: manipulation;
   cursor: pointer;
 }
 
@@ -50,7 +57,8 @@ button:disabled {
 }
 
 a {
-  color: var(--accent);
+  color: var(--signal);
+  text-underline-offset: 3px;
 }
 
 img,
@@ -70,7 +78,7 @@ pre {
 }
 
 :focus-visible {
-  outline: 3px solid var(--accent-line);
+  outline: 2px solid var(--signal);
   outline-offset: 2px;
 }
 
@@ -121,6 +129,18 @@ input[type='radio'] {
     transition-duration: .01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+.theme-switching,
+.theme-switching *,
+.theme-switching *::before,
+.theme-switching *::after {
+  transition: none !important;
+}
+
+.icon {
+  display: block;
+  flex: none;
 }
 
 .visually-hidden {

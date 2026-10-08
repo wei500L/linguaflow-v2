@@ -22,7 +22,32 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
+  background: var(--signal);
+}
+
+/* Phone dock: one tap target, same size as the pause button, so the code can
+   be opened again after the first sheet is dismissed. */
+.dock-bar > .audience-panel.is-compact {
+  flex: none;
+  min-width: var(--tap);
+}
+
+.audience-launch.is-compact {
+  display: grid;
+  place-items: center;
+  width: var(--tap);
+  min-width: var(--tap);
+  max-width: var(--tap);
+  height: var(--tap);
+  padding: 0;
+  border-radius: var(--r-md);
+  box-shadow: var(--shadow-1);
+}
+
+.audience-launch.is-compact.active {
   background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-contrast);
 }
 
 /* The audience sheet is always a dark stage: it exists to be photographed or
@@ -34,7 +59,8 @@
   display: grid;
   place-items: center;
   padding: max(var(--s5), var(--safe-top)) max(var(--s5), var(--safe-right)) max(var(--s5), var(--safe-bottom)) max(var(--s5), var(--safe-left));
-  background: #07110ee0;
+  background: var(--proj-veil);
+  -webkit-backdrop-filter: blur(16px);
   backdrop-filter: blur(16px);
   overflow-y: auto;
 }
@@ -46,7 +72,7 @@
   gap: var(--s4);
   width: min(480px, 100%);
   padding: var(--s7) var(--s4) var(--s5);
-  color: #f6f4ef;
+  color: var(--proj-text);
   text-align: center;
 }
 
@@ -61,15 +87,20 @@
   padding: 0;
   border: 0;
   border-radius: 50%;
-  background: #ffffff14;
-  color: #8d9c96;
+  background: var(--proj-line);
+  color: var(--proj-edge);
   font-size: 24px;
   line-height: 1;
+  transition: color var(--fast) var(--ease);
+}
+
+.audience-close:hover {
+  color: var(--proj-text);
 }
 
 .audience-kicker {
   margin: 0;
-  color: #d7c4a3;
+  color: var(--proj-dim);
   font-size: var(--text-xs);
   letter-spacing: .22em;
   text-transform: uppercase;
@@ -92,7 +123,8 @@
 }
 
 .audience-count strong {
-  color: #f6f4ef;
+  color: var(--proj-text);
+  font-variant-numeric: tabular-nums;
   font-size: clamp(44px, 13vw, 64px);
   font-weight: 560;
   line-height: .9;
@@ -102,7 +134,7 @@
 .audience-count span,
 .audience-lead {
   margin: 0;
-  color: #b7c7c1;
+  color: var(--proj-dim);
   font-size: var(--text-base);
   line-height: 1.5;
 }
@@ -112,7 +144,7 @@
   height: auto;
   padding: var(--s3);
   border-radius: var(--r-xl);
-  background: #fff;
+  background: var(--proj-text);
 }
 
 .audience-actions {
@@ -124,12 +156,12 @@
   min-width: 180px;
   border-radius: var(--r-full);
   padding: 0 var(--s6);
-  background: #f6f4ef;
-  color: #06201d;
+  background: var(--proj-text);
+  color: var(--proj-bg);
 }
 
 .audience-sheet .primary-button:hover:not(:disabled) {
-  background: #fff;
+  background: var(--proj-accent);
 }
 
 .audience-text {
@@ -137,18 +169,18 @@
   padding: 0 var(--s3);
   border: 0;
   background: transparent;
-  color: #f6f4ef;
+  color: var(--proj-text);
   font-size: var(--text-base);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 .audience-text.danger {
-  color: #ffb4a8;
+  color: var(--proj-danger);
 }
 
 .audience-more {
   width: min(340px, 100%);
-  color: #b7c7c1;
+  color: var(--proj-dim);
   font-size: var(--text-sm);
   text-align: left;
 }
@@ -173,14 +205,14 @@
 
 .audience-more input,
 .audience-more select {
-  border-color: #ffffff2b;
-  background-color: #0c1210;
-  color: #f6f4ef;
+  border-color: var(--proj-line);
+  background-color: var(--proj-surface);
+  color: var(--proj-text);
 }
 
 .audience-more .record-toggle {
   display: flex;
-  color: #b7c7c1;
+  color: var(--proj-dim);
 }
 
 .audience-more input[readonly] {
@@ -192,7 +224,7 @@
   width: 100%;
   height: 100%;
   border-radius: 0;
-  background: #0c1210;
+  background: var(--proj-bg);
 }
 
 .audience-sheet:fullscreen .audience-qr {

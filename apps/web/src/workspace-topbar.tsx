@@ -3,6 +3,7 @@ import type { Entitlement } from '@linguaflow/shared';
 import { tr } from './lib/i18n';
 import { LanguageToggle } from './language-toggle';
 import { ThemeToggle } from './theme-toggle';
+import { MenuIcon } from './icons';
 
 export type Panel = 'none' | 'transcripts' | 'glossary' | 'pricing' | 'admin' | 'account';
 export type ServiceStatus = 'checking' | 'online' | 'offline';
@@ -64,7 +65,7 @@ export function Topbar({ entitlement, serviceStatus, isAdmin, live, onPanel, onL
       <span className={`status-pill ${serviceStatus}`}><i />{statusLabel}</span>
       {quota && <span className="quota-pill">{quota}</span>}
       <div className="topbar-menu" ref={menuRef}>
-        <button className="icon-button" aria-expanded={menuOpen} aria-haspopup="menu" aria-label={tr('菜单')} onClick={() => setMenuOpen((open) => !open)}>☰</button>
+        <button className="icon-button" aria-expanded={menuOpen} aria-haspopup="menu" aria-label={tr('菜单')} onClick={() => setMenuOpen((open) => !open)}><MenuIcon /></button>
         {menuOpen && <div className="menu-card" role="menu">
           {items.map((item) => <button key={item.panel} role="menuitem" onClick={() => openPanel(item.panel)}>{tr(item.label)}</button>)}
           <div className="menu-divider" />

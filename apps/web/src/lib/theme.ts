@@ -7,7 +7,7 @@ const themeKey = 'linguaflow_theme';
 const darkQuery = '(prefers-color-scheme: dark)';
 
 /* Kept in sync with --bg in styles/tokens.css so the browser chrome matches the page. */
-const chrome: Record<Resolved, string> = { light: '#fbfbfa', dark: '#0c1110' };
+const chrome: Record<Resolved, string> = { light: '#fafafa', dark: '#000000' };
 
 function storedChoice(): ThemeChoice {
   try {
@@ -28,10 +28,24 @@ const listeners = new Set<() => void>();
 export function getTheme() { return currentChoice; }
 export function resolvedTheme(): Resolved { return currentChoice === 'system' ? systemTheme() : currentChoice; }
 
+/* Colour transitions would otherwise animate every control separately on a theme
+   switch, leaving a frame where half the page is light and half dark. */
+function withoutTransitions(apply: () => void) {
+  const root = document.documentElement;
+  root.classList.add('theme-switching');
+  apply();
+  requestAnimationFrame(() => requestAnimationFrame(() => root.classList.remove('theme-switching')));
+}
+
 function paint() {
   if (typeof document === 'undefined') return;
   const resolved = resolvedTheme();
-  document.documentElement.dataset.theme = resolved;
+  if (document.documentElement.dataset.theme === resolved) return void syncChrome(resolved);
+  withoutTransitions(() => { document.documentElement.dataset.theme = resolved; });
+  syncChrome(resolved);
+}
+
+function syncChrome(resolved: Resolved) {
   let meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
   if (!meta) {
     meta = document.createElement('meta');
@@ -52,7 +66,7 @@ export function setTheme(next: ThemeChoice) {
    user's choice without overwriting it. */
 export function forceDark(active: boolean) {
   if (typeof document === 'undefined') return;
-  if (active) document.documentElement.dataset.theme = 'dark';
+  if (active) withoutTransitions(() => { document.documentElement.dataset.theme = 'dark'; });
   else paint();
 }
 

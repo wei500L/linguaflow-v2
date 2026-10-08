@@ -195,6 +195,8 @@ export function buildSonioxConfig(apiKey: string, session: SonioxSessionInput, t
     language_hints: languageHints,
     enable_language_identification: true,
     enable_speaker_diarization: true,
+    // Leave endpoint delay, sensitivity, and latency adjustment at Soniox defaults.
+    // Raising them finalizes sooner and lowers word and diarization accuracy.
     enable_endpoint_detection: true,
     client_reference_id: session.id,
     translation: oneWay

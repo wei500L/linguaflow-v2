@@ -1,6 +1,8 @@
 /* Mobile-first. tokens.css owns every colour, size and spacing value; the
    layout files below only use two breakpoints, 640px and 1024px, mirrored in
-   lib/breakpoints.ts for the places JavaScript needs the same answer. */
+   lib/breakpoints.ts for the places JavaScript needs the same answer.
+   The workspace top bar and dock also follow their own container size, so a
+   resized desktop window drops items before they clip. */
 
 @import './styles/tokens.css';
 @import './styles/base.css';

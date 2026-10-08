@@ -30,7 +30,7 @@ declare module 'fastify' {
 const app = Fastify({ logger: true });
 await app.register(cors, { origin: config.webOrigin, credentials: false });
 await app.register(jwt, { secret: config.jwtSecret });
-await app.register(websocket);
+await app.register(websocket, { options: { perMessageDeflate: false } });
 app.decorate('authenticate', async (request, reply) => {
   try { await request.jwtVerify(); } catch { await reply.code(401).send({ message: 'Authentication required' }); }
 });
@@ -65,8 +65,10 @@ cleanupTimer.unref();
 
 app.setErrorHandler((error: any, _request, reply) => {
   app.log.error(error);
-  const status = error.name === 'ZodError' ? 400 : (error.statusCode ?? 500);
-  return reply.code(status).send({ message: status === 500 ? 'Internal server error' : error.message });
+  const zod = error?.name === 'ZodError' || Array.isArray(error?.issues);
+  const status = zod ? 400 : (error.statusCode ?? 500);
+  const message = zod ? 'Check the email and password, then try again' : status === 500 ? 'Internal server error' : error.message;
+  return reply.code(status).send({ message });
 });
 
 if (config.bootstrapEmail && config.bootstrapPassword) await bootstrapOwner(config.bootstrapEmail, config.bootstrapPassword);

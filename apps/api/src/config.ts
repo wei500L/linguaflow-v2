@@ -22,6 +22,8 @@ export const config = {
   smtp: {
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT ?? 587),
+    // 465 and 994 are implicit TLS. 587 stays on STARTTLS.
+    secure: [465, 994].includes(Number(process.env.SMTP_PORT ?? 587)),
     user: process.env.SMTP_USER,
     password: process.env.SMTP_PASSWORD,
     from: process.env.SMTP_FROM ?? 'LinguaFlow <no-reply@linguaflow.local>'

@@ -24,7 +24,9 @@ export function useMediaQuery(query: string) {
   return matches;
 }
 
-/** Tracks the visual viewport so the shell can stay put when the keyboard opens. */
+/** Tracks the visual viewport so the shell stays inside the area the user can
+    actually see. iOS moves that area when the keyboard or browser chrome shows,
+    and a shell taller than it hides the start button. */
 export function useViewportHeight() {
   useEffect(() => {
     const apply = () => {
@@ -35,10 +37,12 @@ export function useViewportHeight() {
     window.addEventListener('resize', apply);
     window.addEventListener('orientationchange', apply);
     window.visualViewport?.addEventListener('resize', apply);
+    window.visualViewport?.addEventListener('scroll', apply);
     return () => {
       window.removeEventListener('resize', apply);
       window.removeEventListener('orientationchange', apply);
       window.visualViewport?.removeEventListener('resize', apply);
+      window.visualViewport?.removeEventListener('scroll', apply);
       document.documentElement.style.removeProperty('--app-height');
     };
   }, []);

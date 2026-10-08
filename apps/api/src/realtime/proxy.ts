@@ -14,6 +14,15 @@ import { ensureAudienceShare } from '../lib/audience.js';
 
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const RECONNECT_GRACE_MS = 20_000;
+/** Soniox closes the stream after 20s with no audio and no keepalive, and drops speaker and language context with it. */
+const UPSTREAM_KEEPALIVE_MS = 5_000;
+/** Phones freeze the browser keepalive timer before they stop the mic worklet. Audio has to refresh liveness too, or the 30-minute sweep ends a live session. */
+const CLAIM_TOUCH_MS = 30_000;
+
+function disableNagle(socket: WebSocket) {
+  const raw = (socket as WebSocket & { _socket?: { setNoDelay?: (on: boolean) => void } })._socket;
+  raw?.setNoDelay?.(true);
+}
 
 type LiveRoom = {
   client: WebSocket | null;
@@ -25,6 +34,8 @@ type LiveRoom = {
   languageA: string;
   languageB: string;
   startedAt?: Date;
+  /** PCM bytes forwarded to Soniox. A reconnecting host realigns its latency clock with this. */
+  forwardedAudioBytes: number;
   allowed: number;
   ended: boolean;
   stopRequested: boolean;
@@ -112,6 +123,7 @@ function cleanSpeakerNames(value: unknown) {
 }
 
 export async function handleRealtimeSocket(client: WebSocket, token: string) {
+  disableNagle(client);
   const [claimed] = await db.update(realtimeSessions).set({ claimedAt: new Date(), status: 'connecting' }).where(and(eq(realtimeSessions.sessionTokenHash, hash(token)), eq(realtimeSessions.status, 'pending'), isNull(realtimeSessions.claimedAt), isNull(realtimeSessions.endedAt))).returning();
   const session = claimed;
   if (!session) {
@@ -120,7 +132,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
   }
 
   const loadedGlossary = await loadSessionTerms(session.userId, session.glossaryId);
-  const upstream = new WebSocket(config.sonioxWsUrl);
+  const upstream = new WebSocket(config.sonioxWsUrl, { perMessageDeflate: false });
   let startedAt: Date | undefined;
   let ended = false;
   let limitTimer: NodeJS.Timeout | undefined;
@@ -135,6 +147,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     mode: session.mode,
     languageA: session.languageA,
     languageB: session.languageB ?? session.targetLanguage ?? '',
+    forwardedAudioBytes: 0,
     allowed: Math.min(session.maxSessionSeconds, session.reservedSeconds),
     ended: false,
     stopRequested: false,
@@ -158,6 +171,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
   let stopRequested = false;
   let drainReason: string | null = null;
   let drainTimer: NodeJS.Timeout | undefined;
+  let upstreamKeepalive: NodeJS.Timeout | undefined;
   let resolveDrain: (() => void) | undefined;
   let drainPromise: Promise<void> | null = null;
   const finish = (reason: string) => {
@@ -172,7 +186,8 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     room.stopRequested = true;
     if (upstream.readyState !== upstream.OPEN) return finish(drainReason);
     if (!drainTimer) {
-      upstream.send(Buffer.alloc(0));
+      // An empty binary frame is silence. Soniox ends the stream on an empty text frame, then sends the final tokens.
+      upstream.send('');
       drainTimer = setTimeout(() => { void finish(drainReason ?? reason).catch(() => undefined); }, 8_000);
       drainTimer.unref();
     }
@@ -184,6 +199,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     if (limitTimer) clearTimeout(limitTimer);
     if (quotaTimer) clearInterval(quotaTimer);
     if (drainTimer) clearTimeout(drainTimer);
+    if (upstreamKeepalive) clearInterval(upstreamKeepalive);
     if (room.reconnectTimer) clearTimeout(room.reconnectTimer);
     room.ended = true;
     const endedAt = new Date();
@@ -250,13 +266,20 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     if (saved && transcriptId && audio.status === 'encoding') scheduleRecordingEncode(transcriptId);
   };
   activeSessions.set(session.id, requestDrain);
+  const keepUpstreamAlive = () => {
+    if (ended || stopRequested || room.client || upstream.readyState !== upstream.OPEN) return;
+    upstream.send(JSON.stringify({ type: 'keepalive' }));
+  };
 
   upstream.on('open', async () => {
+    disableNagle(upstream);
     if (ended) return;
     startedAt = new Date();
     await db.update(realtimeSessions).set({ startedAt, status: 'active' }).where(and(eq(realtimeSessions.id, session.id), eq(realtimeSessions.status, 'connecting')));
     if (ended || upstream.readyState !== upstream.OPEN) return;
     upstream.send(JSON.stringify(buildSonioxConfig(config.sonioxApiKey, session, loadedGlossary.terms, loadedGlossary.glossary)));
+    upstreamKeepalive = setInterval(keepUpstreamAlive, UPSTREAM_KEEPALIVE_MS);
+    upstreamKeepalive.unref();
     const allowed = room.allowed;
     room.startedAt = startedAt;
     sendJson(hostSocket(), { type: 'ready', sessionId: session.id, allowedSeconds: allowed });
@@ -275,7 +298,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
   });
   upstream.on('message', (message, isBinary) => {
     if (isBinary) { if (client.readyState === client.OPEN) client.send(message); return; }
-    let event: { tokens?: TranscriptToken[]; finished?: boolean; error_code?: number | null; error_type?: string; error_message?: string };
+    let event: { tokens?: TranscriptToken[]; total_audio_proc_ms?: number; finished?: boolean; error_code?: number | null; error_type?: string; error_message?: string };
     try { event = JSON.parse(message.toString()) as typeof event; } catch { return; }
     if (event.error_code != null || event.error_type) {
       const code = event.error_type || 'upstream_error';
@@ -283,18 +306,26 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
       void finish(code).catch(() => undefined);
       return;
     }
-    if (event.tokens?.length) {
-      for (const token of event.tokens) {
+    const totalAudioProcMs = typeof event.total_audio_proc_ms === 'number' && Number.isFinite(event.total_audio_proc_ms) ? event.total_audio_proc_ms : undefined;
+    if (event.tokens?.length || totalAudioProcMs !== undefined) {
+      for (const token of event.tokens ?? []) {
         if (token.text === '<end>' || token.is_final) finalTokens.push(token);
       }
-      const transcriptEvent = { type: 'transcript', tokens: event.tokens };
-      sendJson(hostSocket(), transcriptEvent);
-      publishAudience(room, transcriptEvent);
+      const tokens = event.tokens ?? [];
+      sendJson(hostSocket(), { type: 'transcript', tokens, ...(totalAudioProcMs !== undefined ? { totalAudioProcMs } : {}) });
+      if (tokens.length) publishAudience(room, { type: 'transcript', tokens });
     }
     if (event.finished) void finish(drainReason ?? 'completed').catch(() => undefined);
   });
   upstream.on('error', () => { void finish(drainReason ?? 'upstream_error').catch(() => undefined); });
   upstream.on('close', () => { void finish(drainReason ?? 'upstream_closed').catch(() => undefined); });
+  let lastClaimTouchMs = Date.now();
+  const noteClientActivity = () => {
+    const now = Date.now();
+    if (now - lastClaimTouchMs < CLAIM_TOUCH_MS) return;
+    lastClaimTouchMs = now;
+    void db.update(realtimeSessions).set({ claimedAt: new Date(now) }).where(eq(realtimeSessions.id, session.id));
+  };
   const bindClient = (socket: WebSocket) => {
     room.client = socket;
     socket.on('message', (message: Buffer, isBinary: boolean) => {
@@ -320,7 +351,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
             return;
           }
           if (stopRequested || upstream.readyState !== upstream.OPEN) return;
-          if (event.type === 'keepalive') { void db.update(realtimeSessions).set({ claimedAt: new Date() }).where(eq(realtimeSessions.id, session.id)); return void upstream.send(data); }
+          if (event.type === 'keepalive') { lastClaimTouchMs = Date.now(); void db.update(realtimeSessions).set({ claimedAt: new Date() }).where(eq(realtimeSessions.id, session.id)); return void upstream.send(data); }
         } catch { /* Ignore malformed control frames. */ }
         return;
       }
@@ -328,11 +359,14 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
       const pcm = Buffer.isBuffer(message) ? message : Buffer.from(message);
       if (pcm.length) recorder?.push(pcm);
       upstream.send(message);
+      room.forwardedAudioBytes += pcm.length;
+      noteClientActivity();
     });
     socket.on('close', () => {
       if (room.client !== socket) return;
       room.client = null;
       if (ended || stopRequested) { void requestDrain('client_closed')?.catch(() => undefined); return; }
+      keepUpstreamAlive();
       if (room.reconnectTimer) clearTimeout(room.reconnectTimer);
       room.reconnectTimer = setTimeout(() => { void requestDrain('client_closed'); }, RECONNECT_GRACE_MS);
       room.reconnectTimer.unref();
@@ -361,7 +395,7 @@ export async function handleReconnectSocket(client: WebSocket, token: string) {
   room.bindClient(client);
   const elapsed = room.startedAt ? Math.floor((Date.now() - room.startedAt.getTime()) / 1000) : 0;
   if (client.readyState === client.OPEN) {
-    client.send(JSON.stringify({ type: 'ready', sessionId: session.id, allowedSeconds: Math.max(0, room.allowed - elapsed) }));
+    client.send(JSON.stringify({ type: 'ready', sessionId: session.id, allowedSeconds: Math.max(0, room.allowed - elapsed), receivedAudioMs: room.forwardedAudioBytes / 32 }));
     client.send(JSON.stringify({ type: 'snapshot', tokens: room.finalTokens, speakerNames: room.speakerNames }));
   }
 }

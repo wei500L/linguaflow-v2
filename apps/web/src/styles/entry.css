@@ -16,7 +16,8 @@
   justify-content: center;
   gap: var(--s2);
   padding: calc(var(--s5) + var(--safe-top)) max(var(--s5), var(--safe-left)) var(--s4) max(var(--s5), var(--safe-right));
-  background: var(--accent-soft);
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-sunken);
 }
 
 .auth-pitch .brand-mark {
@@ -29,7 +30,7 @@
 
 .auth-pitch h1 {
   margin: 0;
-  font-size: clamp(26px, 7vw, 60px);
+  font-size: clamp(22px, 6vw, 28px);
   font-weight: 650;
   line-height: 1.18;
   letter-spacing: -.035em;
@@ -37,15 +38,19 @@
 }
 
 .auth-pitch h1 em {
-  color: var(--accent);
+  color: var(--text-muted);
   font-style: normal;
 }
 
+/* The lede is for the wide sign-in column. On a phone it pushes the password
+   and the sign-in button below the keyboard, so the tap never lands. */
 .auth-pitch > p:not(.eyebrow) {
+  display: none;
   max-width: 34em;
   color: var(--text-muted);
   font-size: var(--text-base);
   line-height: 1.65;
+  text-wrap: balance;
 }
 
 /* The sample caption card is decoration; a phone has better uses for the space. */
@@ -58,27 +63,41 @@
   gap: var(--s2);
   width: min(100%, 430px);
   padding: var(--s5);
-  border: 1px solid var(--accent-line);
+  border: 1px solid var(--border);
   border-radius: var(--r-lg);
   background: var(--surface);
   box-shadow: var(--shadow-2);
 }
 
 .demo-card span {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
   color: var(--text-faint);
   font-size: var(--text-xs);
+  font-weight: 600;
   letter-spacing: .1em;
+}
+
+.demo-card span::before {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--signal);
 }
 
 .demo-card strong {
   color: var(--text-muted);
   font-size: var(--text-base);
+  font-weight: 500;
 }
 
 .demo-card small {
-  color: var(--accent);
+  color: var(--text);
   font-size: var(--text-xl);
-  font-weight: 700;
+  font-weight: 650;
+  letter-spacing: -.02em;
 }
 
 .auth-card {
@@ -100,7 +119,8 @@
 .auth-card-header h2 {
   margin: var(--s2) 0 0;
   font-size: var(--text-2xl);
-  letter-spacing: -.02em;
+  font-weight: 650;
+  letter-spacing: -.03em;
 }
 
 .auth-card-header p {
@@ -113,7 +133,7 @@
   display: grid;
   gap: 6px;
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 600;
 }
 
 /* Replaces a negative margin that broke whenever the input height changed. */
@@ -135,10 +155,15 @@
   border: 0;
   border-radius: var(--r-sm);
   background: transparent;
-  color: var(--accent);
+  color: var(--text-muted);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 600;
   transform: translateY(-50%);
+}
+
+.password-toggle:hover {
+  background: var(--surface-2);
+  color: var(--text);
 }
 
 .auth-links {
@@ -157,9 +182,25 @@
 
 .auth-legal a,
 .marketing-footer a {
-  color: var(--accent);
+  color: var(--text-muted);
   font-size: var(--text-sm);
-  font-weight: 650;
+  font-weight: 500;
+  text-decoration: none;
+}
+
+.auth-legal a:hover,
+.marketing-footer a:hover {
+  color: var(--text);
+  text-decoration: underline;
+}
+
+/* Stays above the home indicator and the on-screen keyboard. */
+.auth-submit {
+  position: sticky;
+  bottom: calc(var(--s3) + var(--safe-bottom));
+  z-index: 1;
+  width: 100%;
+  box-shadow: 0 0 0 8px var(--bg);
 }
 
 @media (min-width: 1024px) {
@@ -168,8 +209,31 @@
   }
 
   .auth-pitch {
+    container-type: inline-size;
     gap: var(--s4);
     padding: 10vh 6vw;
+    border-right: 1px solid var(--border);
+    border-bottom: 0;
+  }
+
+  .auth-card {
+    max-width: 440px;
+  }
+
+  /* The headline is a forced two-line lockup. Size it from the column, not the
+     viewport, so the first line still fits once the pitch is only half the screen. */
+  .auth-pitch h1 {
+    font-size: clamp(32px, 9.6cqi, 52px);
+  }
+
+  .auth-pitch > p:not(.eyebrow) {
+    display: block;
+  }
+
+  .auth-submit {
+    position: static;
+    width: auto;
+    box-shadow: none;
   }
 
   .auth-pitch .demo-card {
@@ -191,7 +255,7 @@
 
 .marketing-page {
   min-height: 100dvh;
-  background: var(--accent-soft);
+  background: var(--bg);
 }
 
 .marketing-nav {
@@ -204,10 +268,19 @@
 }
 
 .marketing-nav a {
-  color: var(--accent);
+  color: var(--text-muted);
   font-size: var(--text-sm);
-  font-weight: 700;
+  font-weight: 600;
   text-decoration: none;
+  transition: color var(--fast) var(--ease);
+}
+
+.marketing-nav a:hover {
+  color: var(--text);
+}
+
+.marketing-nav .wordmark {
+  color: var(--text);
 }
 
 .marketing-nav-actions {
@@ -271,7 +344,8 @@
 
 .marketing-section h2 {
   font-size: var(--text-2xl);
-  letter-spacing: -.02em;
+  font-weight: 650;
+  letter-spacing: -.03em;
   text-wrap: balance;
 }
 
@@ -289,13 +363,24 @@
   border: 1px solid var(--border);
   border-radius: var(--r-lg);
   background: var(--surface);
+  box-shadow: var(--shadow-1);
+}
+
+.scene-grid article {
+  transition: border-color var(--normal) var(--ease), box-shadow var(--normal) var(--ease);
+}
+
+.scene-grid article:hover {
+  border-color: var(--border-strong);
+  box-shadow: var(--shadow-2);
 }
 
 .scene-grid h2,
 .legal-card h1 {
   margin: 0;
   font-size: var(--text-xl);
-  letter-spacing: -.02em;
+  font-weight: 650;
+  letter-spacing: -.025em;
 }
 
 .scene-grid p,

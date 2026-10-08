@@ -4,6 +4,7 @@ import { AudienceLink } from './audience-link';
 import { CAPTION_SIZES, CAPTION_VIEWS, CaptionToolbar, type CaptionView, type SessionStatus } from './caption-stage';
 import { glossaryOptionLabel } from './lib/glossary';
 import { tr } from './lib/i18n';
+import { PauseIcon, PlayIcon, RecordIcon, StopIcon } from './icons';
 import type { AudioSource } from './lib/audio';
 
 type LanguageOption = { code: string; nativeName: string; englishName: string };
@@ -107,6 +108,7 @@ export type ControlDockProps = {
   onCaptionSize: (value: string) => void;
   onFullscreen: () => void;
   onPause: () => void;
+  onCancel: () => void;
   onPrimary: () => void;
   onCopy: () => void;
   onExport: () => void;
@@ -128,6 +130,7 @@ export function ControlDock(props: ControlDockProps) {
     : running ? tr('结束翻译')
     : tr('开始翻译');
   const arming = sessionStatus === 'opening' || sessionStatus === 'connecting' || sessionStatus === 'reconnecting';
+  const cancellable = sessionStatus === 'opening' || sessionStatus === 'connecting';
 
   const settings = <div className={phone ? 'dock-sheet' : 'dock-panel'}>
     <Section title={tr('语言与模式')}>
@@ -194,7 +197,6 @@ export function ControlDock(props: ControlDockProps) {
         <input value={sessionTitle} onChange={(event) => props.onSessionTitle(event.target.value.slice(0, 120))} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} disabled={sessionStatus === 'stopping'} />
       </label>
       <div className="dock-sheet-actions">
-        {liveSessionId && <AudienceLink sessionId={liveSessionId} mode={mode} />}
         <span className={`direction-badge${timeWarning ? ' time-warning' : ''}`}>{directionLabel}{remainingLabel}</span>
       </div>
     </Section>
@@ -203,6 +205,7 @@ export function ControlDock(props: ControlDockProps) {
   return <aside className="control-dock">
     {dockOpen && settings}
     <div className="dock-bar">
+      {liveSessionId && <AudienceLink sessionId={liveSessionId} mode={mode} compact={phone} />}
       {phone && <div className="dock-anchor">
         <button
           type="button"
@@ -221,17 +224,20 @@ export function ControlDock(props: ControlDockProps) {
           onClose={() => props.onCaptionOpen(false)}
         />}
       </div>}
-      {!phone && liveSessionId && <AudienceLink sessionId={liveSessionId} mode={mode} />}
       <button type="button" className="dock-toggle" aria-expanded={dockOpen} onClick={() => props.onDockOpen(!dockOpen)}>
         {dockOpen ? tr('收起') : phone ? tr('更多') : tr('设置')}
       </button>
-      {running && <button type="button" className="dock-icon-button" onClick={props.onPause} aria-label={paused ? tr('继续收音') : tr('暂停收音')} title={tr('暂停收音，计时继续')}>{paused ? '▶' : '❙❙'}</button>}
+      {/* The main button ignores taps while starting, so a permission sheet's
+          dismissal cannot cancel the session. This is the deliberate way out. */}
+      {cancellable && <button type="button" className="dock-toggle" onClick={props.onCancel}>{tr('取消')}</button>}
+      {running && <button type="button" className="dock-icon-button" onClick={props.onPause} aria-label={paused ? tr('继续收音') : tr('暂停收音')} title={tr('暂停收音，计时继续')}>{paused ? <PlayIcon size={16} /> : <PauseIcon size={16} />}</button>}
       <button
+        type="button"
         className={`record-button ${running ? 'recording' : ''} ${arming ? 'arming' : ''}`}
         disabled={sessionStatus === 'stopping'}
         onClick={props.onPrimary}
       >
-        <span aria-hidden="true">{running ? '■' : '●'}</span>
+        {running ? <StopIcon size={16} /> : <RecordIcon size={16} />}
         <span className="record-label">{primaryLabel}</span>
       </button>
       {!phone && <span className={`direction-badge${timeWarning ? ' time-warning' : ''}`}>{directionLabel}{remainingLabel}</span>}

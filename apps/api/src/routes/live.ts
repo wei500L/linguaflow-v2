@@ -4,6 +4,7 @@ import { db } from '../db/index.js';
 import { transcripts } from '../db/schema.js';
 import { ensureAudienceShare, findAudienceSession } from '../lib/audience.js';
 import { hasLiveRoom, joinAudience } from '../realtime/proxy.js';
+import { socketUrl } from '../lib/socket-url.js';
 
 function describe(session: { title: string | null; mode: string; languageA: string; languageB: string | null; targetLanguage: string | null; audienceIncludeAudio: boolean }) {
   return {
@@ -30,9 +31,7 @@ export async function liveRoutes(app: FastifyInstance) {
     if (!session) return reply.code(404).send({ message: '分享链接已失效。' });
     const meta = describe(session);
     if (!session.endedAt && hasLiveRoom(session.id)) {
-      const host = request.headers.host ?? 'localhost:3000';
-      const protocol = request.headers['x-forwarded-proto'] === 'https' ? 'wss' : 'ws';
-      return { phase: 'live', ...meta, websocketUrl: `${protocol}://${host}/v1/live/ws`, websocketProtocols: ['live.v1', token] };
+      return { phase: 'live', ...meta, websocketUrl: socketUrl(request, '/v1/live/ws'), websocketProtocols: ['live.v1', token] };
     }
     if (!session.endedAt) return { phase: 'waiting', ...meta };
     const [transcript] = await db.select().from(transcripts).where(eq(transcripts.sessionId, session.id)).limit(1);

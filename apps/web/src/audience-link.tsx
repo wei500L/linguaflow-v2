@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import QRCode from 'qrcode';
 import { api } from './lib/api';
 import { tr } from './lib/i18n';
+import { CloseIcon, QrIcon } from './icons';
 
 type Audience = { token: string; includeAudio: boolean; expiresAt: string | null };
 type SessionMode = 'one_way' | 'two_way';
@@ -23,7 +24,7 @@ function markRevoked(sessionId: string) {
   try { sessionStorage.setItem(revokedKey(sessionId), '1'); } catch { /* Storage can be blocked. */ }
 }
 
-export function AudienceLink({ sessionId, mode }: { sessionId: string; mode: SessionMode }) {
+export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: string; mode: SessionMode; compact?: boolean }) {
   const classroom = mode === 'one_way';
   const [open, setOpen] = useState(false);
   const [audience, setAudience] = useState<Audience | null>(null);
@@ -153,14 +154,13 @@ export function AudienceLink({ sessionId, mode }: { sessionId: string; mode: Ses
     else { await node.requestFullscreen(); setQrFullscreen(true); }
   }
 
-  return <div className="audience-panel">
-    <button type="button" className="audience-launch" onClick={() => setOpen(true)} aria-expanded={open}>
-      <i />
-      <span>{audience ? viewerCount : tr('听众')}</span>
+  return <div className={`audience-panel${compact ? ' is-compact' : ''}`}>
+    <button type="button" className={compact ? `audience-launch is-compact${open ? ' active' : ''}` : 'audience-launch'} onClick={() => setOpen(true)} aria-expanded={open} aria-label={compact ? tr('二维码') : undefined}>
+      {compact ? <QrIcon size={16} /> : <><i /><span>{audience ? viewerCount : tr('听众')}</span></>}
     </button>
     {open && <div className="audience-overlay" role="presentation" onClick={(event) => { if (event.target === event.currentTarget && !document.fullscreenElement) dismiss(); }}>
       <div className={`audience-sheet${qrFullscreen ? ' is-fullscreen' : ''}`} role="dialog" aria-modal="true" aria-label={tr('听众链接')} ref={sheetRef}>
-        <button type="button" className="audience-close" onClick={dismiss} aria-label={tr('关闭')}>×</button>
+        <button type="button" className="audience-close" onClick={dismiss} aria-label={tr('关闭')}><CloseIcon size={20} /></button>
         <p className="audience-kicker">{classroom ? tr('给学生看') : tr('听众')}</p>
         {audience ? <>
           <p className="audience-count" role="status"><strong>{viewerCount}</strong><span>{tr('人正在看')}</span></p>

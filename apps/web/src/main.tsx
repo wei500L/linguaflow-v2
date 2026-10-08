@@ -1,16 +1,17 @@
 import { StrictMode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, LANGUAGE_OPTIONS, PLANS, type Entitlement, type RealtimeEvent, type TranscriptToken } from '@linguaflow/shared';
-import { api, ApiError, apiResponse, clearToken, getToken, isTokenExpired, setToken, tokenExpiresWithin } from './lib/api';
+import { api, ApiError, apiResponse, clearToken, getToken, isTokenExpired, openSocket, setToken, tokenExpiresWithin } from './lib/api';
 import { PHONE_QUERY, useMediaQuery, useViewportHeight } from './lib/breakpoints';
-import { createPcmStream, listAudioInputs, type AudioSource } from './lib/audio';
+import { createPcmStream, listAudioInputs, trimQueuedAudio, type AudioSource } from './lib/audio';
 import { glossaryOptionLabel, languageNative, sameLanguageCode } from './lib/glossary';
 import { lockProgrammaticScroll, nudgeToBottom } from './lib/follow-scroll';
 import { getLang, tr, useLang } from './lib/i18n';
+import { alignSentAudio, commitSentChunk, createLatencyClock, observeTranscript, readLatency, sameReadout, stampChunk, startMeasuring, type LatencyClock, type LatencyReadout } from './lib/latency';
 import { LanguageToggle } from './language-toggle';
 import { ThemeToggle } from './theme-toggle';
 import { LegalPage, MarketingPage } from './marketing';
-import { PanelShell } from './panel-shell';
+import { ListSkeleton, PanelShell } from './panel-shell';
 import { SharePage } from './share-page';
 import { TranscriptPanel } from './transcript-panel';
 import { FirstRun } from './first-run';
@@ -18,25 +19,57 @@ import { LivePage } from './live-page';
 import { Topbar, type Panel, type ServiceStatus } from './workspace-topbar';
 import { CaptionStage, CaptionToolbar, type CaptionView, type Segment, type SessionStatus } from './caption-stage';
 import { ControlDock } from './control-dock';
+import { LatencyBadge } from './latency-badge';
 import { SessionNotices, type Notice } from './session-notices';
 import './styles.css';
 
 type Profile = { id: string; email: string; displayName?: string | null; role: string };
 
+function authFailure(error: unknown) {
+  const message = error instanceof Error ? error.message : '';
+  if (message === 'Invalid credentials') return tr('邮箱或密码不正确。');
+  if (message === 'Too many login attempts') return tr('尝试次数过多，请 15 分钟后再试。');
+  if (message === 'Invalid verification code') return tr('验证码不正确。');
+  if (message === 'Account not found') return tr('找不到这个账户。');
+  if (message === 'Email already registered') return tr('这个邮箱已经注册过了。');
+  if (message === 'Check the email and password, then try again' || message.includes('Invalid email') || message.startsWith('[')) return tr('邮箱格式不正确，请检查空格后重试。');
+  if (message === 'Load failed' || message === 'Failed to fetch' || message === 'NetworkError when attempting to fetch resource.') return tr('网络中断了，请再试一次。');
+  return message ? tr(message) : tr('操作失败');
+}
+
 function AuthScreen({ onLogin }: { onLogin: () => void }) {
   const [mode, setMode] = useState<'login' | 'register' | 'code_login' | 'reset'>('login');
-  const [email, setEmail] = useState(''); const [password, setPassword] = useState(''); const [code, setCode] = useState('');
-  const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false); const [cooldown, setCooldown] = useState(0); const [showPassword, setShowPassword] = useState(false); const codeInput = useRef<HTMLInputElement>(null);
+  const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false); const [cooldown, setCooldown] = useState(0); const [showPassword, setShowPassword] = useState(false);
+  const formRef = useRef<HTMLFormElement>(null); const codeInput = useRef<HTMLInputElement>(null); const messageRef = useRef<HTMLDivElement>(null);
   useEffect(() => { if (cooldown <= 0) return; const timer = window.setTimeout(() => setCooldown(cooldown - 1), 1000); return () => window.clearTimeout(timer); }, [cooldown]);
-  async function sendVerificationCode() { const path = mode === 'register' ? '/v1/auth/email/register/code' : mode === 'reset' ? '/v1/auth/email/password-reset/code' : '/v1/auth/email/login/code'; await api(path, { method: 'POST', body: JSON.stringify({ email }) }); setCooldown(60); setMessage(tr('验证码已发送，请查收邮箱。')); codeInput.current?.focus(); }
-  async function submit(event: React.FormEvent) {
-    event.preventDefault(); setBusy(true); setMessage('');
+  useEffect(() => { if (message) messageRef.current?.scrollIntoView({ block: 'nearest' }); }, [message]);
+  /* Inputs stay uncontrolled. A phone password manager fills the DOM without a
+     React onChange, and the next render was wiping that value before submit. */
+  function credentials() {
+    const data = new FormData(formRef.current ?? undefined);
+    return {
+      email: String(data.get('email') ?? '').replace(/\s+/g, ''),
+      password: String(data.get('password') ?? '').trim(),
+      code: String(data.get('code') ?? '').trim()
+    };
+  }
+  async function sendVerificationCode() {
+    const { email } = credentials();
+    if (!email) { setMessage(tr('请先填写邮箱。')); return; }
+    const path = mode === 'register' ? '/v1/auth/email/register/code' : mode === 'reset' ? '/v1/auth/email/password-reset/code' : '/v1/auth/email/login/code';
+    await api(path, { method: 'POST', body: JSON.stringify({ email }) });
+    setCooldown(60); setMessage(tr('验证码已发送，请查收邮箱。')); codeInput.current?.focus();
+  }
+  async function submit(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    const { email, password, code } = credentials();
+    if (!email) { setMessage(tr('请先填写邮箱。')); return; }
+    if (mode !== 'code_login' && password.length < 8) { setMessage(tr('密码至少 8 位。')); return; }
+    if ((mode === 'code_login' || mode === 'reset') && code.length < 6) { setMessage(tr('请填写 6 位验证码。')); return; }
+    setBusy(true); setMessage('');
     try {
       if (mode === 'register') {
-        if (!code) {
-          await sendVerificationCode();
-          return;
-        }
+        if (!code) { await sendVerificationCode(); return; }
         const result = await api<{ token: string }>('/v1/auth/email/register', { method: 'POST', body: JSON.stringify({ email, password, code }) });
         setToken(result.token); onLogin();
       } else if (mode === 'code_login') {
@@ -49,9 +82,9 @@ function AuthScreen({ onLogin }: { onLogin: () => void }) {
         const result = await api<{ token: string }>('/v1/auth/email/login/password', { method: 'POST', body: JSON.stringify({ email, password }) });
         setToken(result.token); onLogin();
       }
-    } catch (error) { setMessage(error instanceof Error ? error.message : tr('操作失败')); } finally { setBusy(false); }
+    } catch (error) { setMessage(authFailure(error)); } finally { setBusy(false); }
   }
-  return <main className="auth-layout"><section className="auth-pitch"><div className="brand-mark">L</div><p className="eyebrow">LINGUAFLOW</p><h1>{tr('让每一次对话，')}<br /><em>{tr('自然地抵达')}</em></h1><p>{tr('实时语音识别、翻译与字幕记录，适用于会议、课堂和跨语言交流。')}</p><div className="demo-card"><span>ZH · 00:18</span><strong>{tr('欢迎来到 LinguaFlow')}</strong><small>Welcome to LinguaFlow</small></div></section><form className="auth-card" onSubmit={submit}><div className="auth-card-header"><div className="menu-row"><ThemeToggle /><LanguageToggle className="secondary-button" /></div><h2>{mode === 'register' ? tr('创建账户') : mode === 'reset' ? tr('重置密码') : tr('登录 LinguaFlow')}</h2><p>{tr('继续使用你的实时翻译工作区')}</p></div><label>{tr('邮箱')}<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required placeholder="you@example.com" autoComplete="email" /></label>{mode !== 'code_login' && <label>{mode === 'reset' ? tr('新密码') : tr('密码')}<span className="password-field"><input type={showPassword ? "text" : "password"} value={password} onChange={(e) => setPassword(e.target.value)} required minLength={8} placeholder={tr('至少 8 位字符')} autoComplete={mode === 'reset' || mode === 'register' ? 'new-password' : 'current-password'} /><button type="button" className="password-toggle" aria-label={showPassword ? tr('隐藏密码') : tr('显示密码')} onClick={() => setShowPassword((value) => !value)}>{showPassword ? tr('隐藏') : tr('显示')}</button></span></label>}{mode !== 'login' && <label>{tr('验证码')}<input ref={codeInput} value={code} onChange={(e) => setCode(e.target.value)} inputMode="numeric" placeholder={tr('邮箱验证码')} required={mode !== 'register'} autoComplete="one-time-code" /></label>}{mode !== 'login' && <button type="button" className="link-button" disabled={cooldown > 0 || busy} onClick={() => void sendVerificationCode().catch((error) => setMessage(error.message))}>{cooldown > 0 ? `${cooldown} ${tr('秒后重发')}` : tr('发送验证码')}</button>}{message && <div className="form-message" role="alert">{message}</div>}<button className="primary-button" disabled={busy}>{busy ? tr('处理中…') : mode === 'login' ? tr('登录') : mode === 'register' ? tr('完成注册') : mode === 'reset' ? tr('重置密码') : tr('验证码登录')}</button><div className="auth-links"><button type="button" className="link-button" onClick={() => { setMode('code_login'); setMessage(''); }}>{tr('验证码登录')}</button><button type="button" className="link-button" onClick={() => { setMode('reset'); setMessage(''); }}>{tr('忘记密码')}</button><button type="button" className="link-button" onClick={() => { setMode(mode === 'register' ? 'login' : 'register'); setMessage(''); setCode(''); }}>{mode === 'register' ? tr('返回登录') : tr('创建账户')}</button></div><p className="auth-legal"><a href="/privacy">{tr('隐私政策')}</a><a href="/terms">{tr('服务条款')}</a></p></form></main>;
+  return <main className="auth-layout"><section className="auth-pitch"><div className="brand-mark">L</div><p className="eyebrow">LINGUAFLOW</p><h1>{tr('让每一次对话，')}<br /><em>{tr('自然地抵达')}</em></h1><p>{tr('实时语音识别、翻译与字幕记录，适用于会议、课堂和跨语言交流。')}</p><div className="demo-card"><span>ZH · 00:18</span><strong>{tr('欢迎来到 LinguaFlow')}</strong><small>Welcome to LinguaFlow</small></div></section><form ref={(node) => { formRef.current = node; if (node) node.noValidate = true; }} key={mode} className="auth-card" onSubmit={submit}><div className="auth-card-header"><div className="menu-row"><ThemeToggle /><LanguageToggle className="secondary-button" /></div><h2>{mode === 'register' ? tr('创建账户') : mode === 'reset' ? tr('重置密码') : tr('登录 LinguaFlow')}</h2><p>{tr('继续使用你的实时翻译工作区')}</p></div><label>{tr('邮箱')}<input name="email" type="email" required placeholder="you@example.com" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="next" inputMode="email" /></label>{mode !== 'code_login' && <label>{mode === 'reset' ? tr('新密码') : tr('密码')}<span className="password-field"><input name="password" type={showPassword ? 'text' : 'password'} required minLength={8} placeholder={tr('至少 8 位字符')} autoComplete={mode === 'reset' || mode === 'register' ? 'new-password' : 'current-password'} autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="go" /><button type="button" className="password-toggle" aria-label={showPassword ? tr('隐藏密码') : tr('显示密码')} onClick={() => setShowPassword((value) => !value)}>{showPassword ? tr('隐藏') : tr('显示')}</button></span></label>}{mode !== 'login' && <label>{tr('验证码')}<input ref={codeInput} name="code" inputMode="numeric" placeholder={tr('邮箱验证码')} required={mode !== 'register'} autoComplete="one-time-code" enterKeyHint="go" /></label>}{mode !== 'login' && <button type="button" className="link-button" disabled={cooldown > 0 || busy} onClick={() => void sendVerificationCode().catch((error) => setMessage(authFailure(error)))}>{cooldown > 0 ? `${cooldown} ${tr('秒后重发')}` : tr('发送验证码')}</button>}{message && <div ref={messageRef} className="form-message" role="alert">{message}</div>}<button className="primary-button auth-submit" type="submit" disabled={busy}>{busy ? tr('处理中…') : mode === 'login' ? tr('登录') : mode === 'register' ? tr('完成注册') : mode === 'reset' ? tr('重置密码') : tr('验证码登录')}</button><div className="auth-links"><button type="button" className="link-button" onClick={() => { setMode('code_login'); setMessage(''); }}>{tr('验证码登录')}</button><button type="button" className="link-button" onClick={() => { setMode('reset'); setMessage(''); }}>{tr('忘记密码')}</button><button type="button" className="link-button" onClick={() => { setMode(mode === 'register' ? 'login' : 'register'); setMessage(''); }}>{mode === 'register' ? tr('返回登录') : tr('创建账户')}</button></div><p className="auth-legal"><a href="/privacy">{tr('隐私政策')}</a><a href="/terms">{tr('服务条款')}</a></p></form></main>;
 }
 
 type GlossaryTerm = { id: string; source: string; target: string; pinned?: boolean };
@@ -160,7 +193,7 @@ function GlossaryPanel({ onClose, languageA, languageB, activeId, onActive, onLi
     } catch (err) { setError(err instanceof Error ? err.message : '导出失败'); }
   }
   const orderedTerms = [...(selected?.terms ?? [])].sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)));
-  return <PanelShell title={tr('术语库')} onClose={onClose}><p className="panel-description">{tr('单向按当前会话方向注入。方向相反时会自动对调。双向会话会同时使用反向译法。')}</p><div className="glossary-switch"><select value={activeId} onChange={(event) => onActive(event.target.value)} aria-label={tr('选择术语库')}><option value="">{tr('不使用术语库')}</option>{items.map((item) => <option value={item.id} key={item.id}>{glossaryOptionLabel(item)}</option>)}</select></div><div className="term-form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder={tr('词库名称')} aria-label={tr('词库名称')} /><LanguagePairFields a={createLangA} b={createLangB} onA={setCreateLangA} onB={setCreateLangB} />{sameLanguageCode(createLangA, createLangB) && <p className="form-message" role="alert">{tr('源语言和目标语言不能相同。')}</p>}<button className="primary-button" onClick={() => void createGlossary()} disabled={saving || !name.trim() || sameLanguageCode(createLangA, createLangB)}>{tr('新建词库')}</button></div><div className="preset-groups"><div><p className="eyebrow">{tr('课程词库')}</p><p className="panel-description">{tr('每门课单独一份。点一次只新建这一门。')}</p><div className="list-item-actions"><button className="secondary-button" onClick={() => void usePreset('analysis')} disabled={saving}>{tr('数学分析词库')}</button><button className="secondary-button" onClick={() => void usePreset('algebra')} disabled={saving}>{tr('线性代数词库')}</button><button className="secondary-button" onClick={() => void usePreset('discrete')} disabled={saving}>{tr('离散数学词库')}</button><button className="secondary-button" onClick={() => void usePreset('pascal')} disabled={saving}>{tr('Pascal 词库')}</button><button className="secondary-button" onClick={() => void usePreset('practice')} disabled={saving}>{tr('计算机实践词库')}</button><button className="secondary-button" onClick={() => void usePreset('history')} disabled={saving}>{tr('历史词库')}</button><button className="secondary-button" onClick={() => void usePreset('safety')} disabled={saving}>{tr('生命安全词库')}</button></div></div><div><p className="eyebrow">{tr('通用词库')}</p><div className="list-item-actions"><button className="secondary-button" onClick={() => void usePreset('classroom')} disabled={saving}>{tr('课堂词库')}</button><button className="secondary-button" onClick={() => void usePreset('medical')} disabled={saving}>{tr('医学词库')}</button><button className="secondary-button" onClick={() => void usePreset('legal')} disabled={saving}>{tr('法律词库')}</button></div></div></div>{selected && <div className="term-form"><div className="term-row"><input value={source} onChange={(event) => setSource(event.target.value)} placeholder={languageNative(selected.languageA)} aria-label={tr('原文术语')} /><span>→</span><input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={languageNative(selected.languageB)} aria-label={tr('指定译法')} /></div><button className="primary-button" onClick={() => void addTerm()} disabled={saving || !source.trim() || !target.trim()}>{saving ? tr('添加中…') : tr('添加术语')}</button></div>}{message && <div className="form-message success-message" role="status">{message}</div>}{error && <div className="form-message" role="alert">{error}</div>}<div className="panel-list">{loading && <div className="panel-empty">{tr('正在加载术语库…')}</div>}{!loading && !items.length && <div className="panel-empty">{tr('还没有术语库。')}</div>}{selected && !selected.terms?.length && <div className="panel-empty">{tr('还没有词条。')}</div>}{orderedTerms.map((term) => <div className="panel-list-item" key={term.id}>{editingId === term.id ? <div className="term-edit"><input value={draftSource} onChange={(event) => setDraftSource(event.target.value)} aria-label={tr('原文术语')} /><span>→</span><input value={draftTarget} onChange={(event) => setDraftTarget(event.target.value)} aria-label={tr('指定译法')} /><button className="secondary-button" onClick={() => void saveTerm(term)} disabled={saving}>{tr('保存')}</button><button className="secondary-button" onClick={() => setEditingId(null)}>{tr('取消')}</button></div> : <div className="term-line"><span><strong>{term.pinned ? '★ ' : ''}{term.source}</strong><small>{term.target}</small></span><span className="list-item-actions"><button className="secondary-button" onClick={() => void pinTerm(term)}>{term.pinned ? tr('取消优先') : tr('优先')}</button><button className="secondary-button" onClick={() => { setEditingId(term.id); setDraftSource(term.source); setDraftTarget(term.target); }}>{tr('编辑')}</button><button className="danger-button" onClick={() => void removeTerm(term)}>{tr('删除词条')}</button></span></div>}</div>)}{selected && <div className="glossary-tools"><div className="term-form"><label>{tr('词库名称')}<input value={glossaryName} onChange={(event) => setGlossaryName(event.target.value)} /></label><div className="term-row"><LanguagePairFields a={langA} b={langB} onA={setLangA} onB={setLangB} /></div>{sameLanguageCode(langA, langB) && <p className="form-message" role="alert">{tr('源语言和目标语言不能相同。')}</p>}<div className="list-item-actions"><button className="secondary-button" onClick={() => void saveGlossary()} disabled={saving || sameLanguageCode(langA, langB)}>{tr('保存词库')}</button><button className="secondary-button" onClick={() => void exportTerms()}>{tr('导出术语')}</button><button className="danger-button" onClick={() => void removeGlossary(selected)}>{tr('删除')}</button></div></div><label>{tr('导入术语')}<textarea className="summary-editor" value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={tr('每行一条，原文和译法用 Tab 分开。')} /></label><button className="secondary-button" onClick={() => void importTerms()} disabled={saving || !importText.trim()}>{tr('导入')}</button></div>}</div></PanelShell>;
+  return <PanelShell title={tr('术语库')} onClose={onClose}><p className="panel-description">{tr('单向按当前会话方向注入。方向相反时会自动对调。双向会话会同时使用反向译法。')}</p><div className="glossary-switch"><select value={activeId} onChange={(event) => onActive(event.target.value)} aria-label={tr('选择术语库')}><option value="">{tr('不使用术语库')}</option>{items.map((item) => <option value={item.id} key={item.id}>{glossaryOptionLabel(item)}</option>)}</select></div><div className="term-form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder={tr('词库名称')} aria-label={tr('词库名称')} /><LanguagePairFields a={createLangA} b={createLangB} onA={setCreateLangA} onB={setCreateLangB} />{sameLanguageCode(createLangA, createLangB) && <p className="form-message" role="alert">{tr('源语言和目标语言不能相同。')}</p>}<button className="primary-button" onClick={() => void createGlossary()} disabled={saving || !name.trim() || sameLanguageCode(createLangA, createLangB)}>{tr('新建词库')}</button></div><div className="preset-groups"><div><p className="eyebrow">{tr('课程词库')}</p><p className="panel-description">{tr('每门课单独一份。点一次只新建这一门。')}</p><div className="list-item-actions"><button className="secondary-button" onClick={() => void usePreset('analysis')} disabled={saving}>{tr('数学分析词库')}</button><button className="secondary-button" onClick={() => void usePreset('algebra')} disabled={saving}>{tr('线性代数词库')}</button><button className="secondary-button" onClick={() => void usePreset('discrete')} disabled={saving}>{tr('离散数学词库')}</button><button className="secondary-button" onClick={() => void usePreset('pascal')} disabled={saving}>{tr('Pascal 词库')}</button><button className="secondary-button" onClick={() => void usePreset('practice')} disabled={saving}>{tr('计算机实践词库')}</button><button className="secondary-button" onClick={() => void usePreset('history')} disabled={saving}>{tr('历史词库')}</button><button className="secondary-button" onClick={() => void usePreset('safety')} disabled={saving}>{tr('生命安全词库')}</button></div></div><div><p className="eyebrow">{tr('通用词库')}</p><div className="list-item-actions"><button className="secondary-button" onClick={() => void usePreset('classroom')} disabled={saving}>{tr('课堂词库')}</button><button className="secondary-button" onClick={() => void usePreset('medical')} disabled={saving}>{tr('医学词库')}</button><button className="secondary-button" onClick={() => void usePreset('legal')} disabled={saving}>{tr('法律词库')}</button></div></div></div>{selected && <div className="term-form"><div className="term-row"><input value={source} onChange={(event) => setSource(event.target.value)} placeholder={languageNative(selected.languageA)} aria-label={tr('原文术语')} /><span>→</span><input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={languageNative(selected.languageB)} aria-label={tr('指定译法')} /></div><button className="primary-button" onClick={() => void addTerm()} disabled={saving || !source.trim() || !target.trim()}>{saving ? tr('添加中…') : tr('添加术语')}</button></div>}{message && <div className="form-message success-message" role="status">{message}</div>}{error && <div className="form-message" role="alert">{error}</div>}<div className="panel-list">{loading && <ListSkeleton label={tr('正在加载术语库…')} />}{!loading && !items.length && <div className="panel-empty">{tr('还没有术语库。')}</div>}{selected && !selected.terms?.length && <div className="panel-empty">{tr('还没有词条。')}</div>}{orderedTerms.map((term) => <div className="panel-list-item" key={term.id}>{editingId === term.id ? <div className="term-edit"><input value={draftSource} onChange={(event) => setDraftSource(event.target.value)} aria-label={tr('原文术语')} /><span>→</span><input value={draftTarget} onChange={(event) => setDraftTarget(event.target.value)} aria-label={tr('指定译法')} /><button className="secondary-button" onClick={() => void saveTerm(term)} disabled={saving}>{tr('保存')}</button><button className="secondary-button" onClick={() => setEditingId(null)}>{tr('取消')}</button></div> : <div className="term-line"><span><strong>{term.pinned ? '★ ' : ''}{term.source}</strong><small>{term.target}</small></span><span className="list-item-actions"><button className="secondary-button" onClick={() => void pinTerm(term)}>{term.pinned ? tr('取消优先') : tr('优先')}</button><button className="secondary-button" onClick={() => { setEditingId(term.id); setDraftSource(term.source); setDraftTarget(term.target); }}>{tr('编辑')}</button><button className="danger-button" onClick={() => void removeTerm(term)}>{tr('删除词条')}</button></span></div>}</div>)}{selected && <div className="glossary-tools"><div className="term-form"><label>{tr('词库名称')}<input value={glossaryName} onChange={(event) => setGlossaryName(event.target.value)} /></label><div className="term-row"><LanguagePairFields a={langA} b={langB} onA={setLangA} onB={setLangB} /></div>{sameLanguageCode(langA, langB) && <p className="form-message" role="alert">{tr('源语言和目标语言不能相同。')}</p>}<div className="list-item-actions"><button className="secondary-button" onClick={() => void saveGlossary()} disabled={saving || sameLanguageCode(langA, langB)}>{tr('保存词库')}</button><button className="secondary-button" onClick={() => void exportTerms()}>{tr('导出术语')}</button><button className="danger-button" onClick={() => void removeGlossary(selected)}>{tr('删除')}</button></div></div><label>{tr('导入术语')}<textarea className="summary-editor" value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={tr('每行一条，原文和译法用 Tab 分开。')} /></label><button className="secondary-button" onClick={() => void importTerms()} disabled={saving || !importText.trim()}>{tr('导入')}</button></div>}</div></PanelShell>;
 }
 
 function formatDuration(seconds: number) {
@@ -293,6 +326,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
 }
 
 const CAPTION_PAGE = 80;
+const NO_LATENCY: LatencyReadout = { recognition: null, translation: null };
 type ActiveSession = { id: string; mode: 'one_way' | 'two_way'; status: string; title: string | null; languageA: string; languageB: string | null; targetLanguage: string | null };
 
 function App() {
@@ -306,7 +340,7 @@ function App() {
   const [languageA, setLanguageA] = useState(() => localStorage.getItem('linguaflow_lang_a') || 'ru'); const [languageB, setLanguageB] = useState(() => localStorage.getItem('linguaflow_lang_b') || 'zh');
   const [glossaryId, setGlossaryId] = useState(() => localStorage.getItem('linguaflow_glossary') || ''); const [glossaryChoices, setGlossaryChoices] = useState<Glossary[]>([]);
   const [languages, setLanguages] = useState<Array<{ code: string; nativeName: string; englishName: string }>>([]);
-  const [audioSource, setAudioSource] = useState<AudioSource>('microphone'); const [recordAudio, setRecordAudio] = useState(() => localStorage.getItem('linguaflow_record_audio') !== '0'); const [dockOpen, setDockOpen] = useState(false); const [captionOpen, setCaptionOpen] = useState(false); const [showJump, setShowJump] = useState(false); const stageRef = useRef<HTMLDivElement>(null); const followLatest = useRef(true); const scrolling = useRef(false); const seenInterim = useRef(new Set<number>()); const freshCommitted = useRef(new Set<number>()); const captionFold = useRef(createCaptionFold()); const captionLimitRef = useRef(CAPTION_PAGE); const windowEndRef = useRef(0); const scrollAnchor = useRef(0);
+  const [audioSource, setAudioSource] = useState<AudioSource>('microphone'); const [recordAudio, setRecordAudio] = useState(() => localStorage.getItem('linguaflow_record_audio') !== '0'); const [dockOpen, setDockOpen] = useState(false); const [captionOpen, setCaptionOpen] = useState(false); const [showJump, setShowJump] = useState(false); const stageRef = useRef<HTMLDivElement>(null); const followLatest = useRef(true); const scrolling = useRef(false); const captionFold = useRef(createCaptionFold()); const captionLimitRef = useRef(CAPTION_PAGE); const windowEndRef = useRef(0); const scrollAnchor = useRef(0);
   const [sessionStatus, setSessionStatus] = useState<SessionStatus>('idle'); const [serviceStatus, setServiceStatus] = useState<ServiceStatus>('checking'); const [segments, setSegments] = useState<Segment[]>([]); const [error, setError] = useState('');
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null); const [endedTranscriptId, setEndedTranscriptId] = useState<string | null>(null); const [focusTranscriptId, setFocusTranscriptId] = useState<string | null>(null);
   const [recordAck, setRecordAck] = useState(() => localStorage.getItem('linguaflow_record_ack') === '1');
@@ -316,15 +350,16 @@ function App() {
   const [showGuide, setShowGuide] = useState(() => localStorage.getItem('linguaflow_seen_guide') !== '1'); const [captionView, setCaptionView] = useState<CaptionView>(() => { const saved = localStorage.getItem('linguaflow_caption_view'); return saved === 'translation' || saved === 'source' ? saved : 'both'; });
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({}); const [namingSpeaker, setNamingSpeaker] = useState<string | null>(null); const [speakerDraft, setSpeakerDraft] = useState('');
   const [mics, setMics] = useState<Array<{ id: string; label: string }>>([]); const [micId, setMicId] = useState(() => localStorage.getItem('linguaflow_mic') || ''); const [liveNotice, setLiveNotice] = useState('');
+  const [audioStalled, setAudioStalled] = useState(false); const sessionReady = useRef(false);
   const acceptAudio = useRef(false); const userStop = useRef(false); const recoverLock = useRef(false); const readyWait = useRef<((ok: boolean) => void) | null>(null); const speakerNamesRef = useRef<Record<string, string>>({}); const closeTitleRef = useRef('');
   const limitSeconds = useRef<number | null>(null); const readyAt = useRef<number | null>(null); const savedTranscriptId = useRef<string | null>(null);
-  const statusRef = useRef<SessionStatus>('idle'); const generation = useRef(0); const authToken = useRef(getToken()); const sessionId = useRef<string | null>(null); const socket = useRef<WebSocket | null>(null); const audio = useRef<{ stop: () => Promise<void> } | null>(null); const keepalive = useRef<number | null>(null); const startupTimer = useRef<number | null>(null); const drain = useRef<(() => void) | null>(null); const upstreamDone = useRef(false); const audioQueue = useRef<ArrayBuffer[]>([]);
+  const statusRef = useRef<SessionStatus>('idle'); const generation = useRef(0); const authToken = useRef(getToken()); const sessionId = useRef<string | null>(null); const socket = useRef<WebSocket | null>(null); const audio = useRef<{ stop: () => Promise<void> } | null>(null); const keepalive = useRef<number | null>(null); const startupTimer = useRef<number | null>(null); const drain = useRef<(() => void) | null>(null); const upstreamDone = useRef(false); const audioQueue = useRef<Array<{ pcm: ArrayBuffer; durationMs: number; capturedAt: number }>>([]); const latencyClock = useRef<LatencyClock>(createLatencyClock()); const [latency, setLatency] = useState<LatencyReadout>(NO_LATENCY);
   const running = sessionStatus === 'running'; const busySession = sessionStatus !== 'idle';
   function updateSessionStatus(next: SessionStatus) { statusRef.current = next; setSessionStatus(next); }
   useEffect(() => { const expire = () => { void stop(); clearToken(); setAuthenticated(false); }; window.addEventListener('linguaflow:auth-expired', expire); const timer = window.setInterval(() => { if (getToken() && isTokenExpired()) expire(); }, 30_000); return () => { window.removeEventListener('linguaflow:auth-expired', expire); window.clearInterval(timer); }; }, []);
   useEffect(() => { let alive = true; async function check() { try { const response = await fetch((import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? 'http://localhost:3000' : '')) + '/health'); if (alive) setServiceStatus(response.ok ? 'online' : 'offline'); } catch { if (alive) setServiceStatus('offline'); } } void check(); const timer = window.setInterval(() => void check(), 30_000); return () => { alive = false; window.clearInterval(timer); }; }, []);
 
-  useEffect(() => { document.documentElement.lang = getLang() === 'en' ? 'en' : 'zh-CN'; document.title = getLang() === 'en' ? 'LinguaFlow · Live Translation' : 'LinguaFlow · 实时双语翻译'; if (authenticated) { api<Entitlement>('/v1/me/entitlement').then(setEntitlement).catch(() => setAuthenticated(false)); api<Profile>('/v1/me/profile').then(setProfile).catch(() => undefined); api<Array<{ code: string; nativeName: string; englishName: string }>>('/v1/me/languages').then((items) => { setLanguages(items); if (!items.some((item) => item.code === languageA)) setLanguageA(items[0]?.code ?? 'zh'); if (!items.some((item) => item.code === languageB)) setLanguageB(items[1]?.code ?? items[0]?.code ?? 'en'); }).catch(() => undefined); } }, [authenticated]);
+  useEffect(() => { document.documentElement.lang = getLang() === 'en' ? 'en' : 'zh-CN'; document.title = getLang() === 'en' ? 'LinguaFlow · Live Translation' : 'LinguaFlow · 实时双语翻译'; if (authenticated) { api<Entitlement>('/v1/me/entitlement').then(setEntitlement).catch((error) => { if (error instanceof ApiError && error.status === 401) setAuthenticated(false); }); api<Profile>('/v1/me/profile').then(setProfile).catch(() => undefined); api<Array<{ code: string; nativeName: string; englishName: string }>>('/v1/me/languages').then((items) => { setLanguages(items); if (!items.some((item) => item.code === languageA)) setLanguageA(items[0]?.code ?? 'zh'); if (!items.some((item) => item.code === languageB)) setLanguageB(items[1]?.code ?? items[0]?.code ?? 'en'); }).catch(() => undefined); } }, [authenticated]);
   useEffect(() => { authToken.current = getToken(); }, [authenticated]);
   useEffect(() => { localStorage.setItem('linguaflow_lang_a', languageA); localStorage.setItem('linguaflow_lang_b', languageB); }, [languageA, languageB]);
   useEffect(() => { localStorage.setItem('linguaflow_record_audio', recordAudio ? '1' : '0'); }, [recordAudio]);
@@ -340,6 +375,34 @@ function App() {
     return () => window.clearTimeout(handle);
   }, [sessionTitle, sessionStatus]);
   useEffect(() => { localStorage.setItem('linguaflow_mic', micId); }, [micId]);
+  /* A phone that dims its screen also suspends the mic, so keep it awake while a
+     session is live. The lock drops whenever the tab hides and is retaken on return. */
+  const sessionLive = sessionStatus === 'running' || sessionStatus === 'reconnecting';
+  useEffect(() => {
+    if (!sessionLive) return;
+    type ScreenLock = { release: () => Promise<void>; addEventListener?: (type: 'release', listener: () => void) => void };
+    const nav = navigator as Navigator & { wakeLock?: { request: (type: 'screen') => Promise<ScreenLock> } };
+    let lock: ScreenLock | null = null;
+    let stopped = false;
+    async function acquire() {
+      if (stopped || lock || document.visibilityState !== 'visible' || !nav.wakeLock) return;
+      try {
+        const next = await nav.wakeLock.request('screen');
+        if (stopped) { void next.release().catch(() => undefined); return; }
+        lock = next;
+        next.addEventListener?.('release', () => { if (lock === next) lock = null; });
+      } catch { lock = null; }
+    }
+    const onVisible = () => { if (document.visibilityState === 'visible') void acquire(); };
+    void acquire();
+    document.addEventListener('visibilitychange', onVisible);
+    return () => {
+      stopped = true;
+      document.removeEventListener('visibilitychange', onVisible);
+      void lock?.release().catch(() => undefined);
+      lock = null;
+    };
+  }, [sessionLive]);
   useEffect(() => { if (!authenticated) return; void listAudioInputs().then(setMics).catch(() => undefined); }, [authenticated, dockOpen, sessionStatus]);
   useEffect(() => { const onChange = () => setFullscreen(Boolean(document.fullscreenElement)); document.addEventListener('fullscreenchange', onChange); return () => document.removeEventListener('fullscreenchange', onChange); }, []);
   useEffect(() => { if (!authenticated) return; let alive = true; api<{ session: ActiveSession | null }>('/v1/realtime/sessions/active').then((result) => { if (alive && result.session && statusRef.current === 'idle') setConflictSession(result.session); }).catch(() => undefined); return () => { alive = false; }; }, [authenticated]);
@@ -371,6 +434,17 @@ function App() {
     const timer = window.setInterval(tick, 250);
     return () => window.clearInterval(timer);
   }, [sessionStatus]);
+  /* Results arrive several times a second. The badge reads the clock at a steady rate so it can also rise during a stall. */
+  useEffect(() => {
+    if (!sessionLive) return;
+    const tick = () => {
+      const next = readLatency(latencyClock.current, performance.now(), !paused && !audioStalled);
+      setLatency((current) => sameReadout(current, next) ? current : next);
+    };
+    tick();
+    const timer = window.setInterval(tick, 250);
+    return () => window.clearInterval(timer);
+  }, [sessionLive, paused, audioStalled]);
   useEffect(() => { if (!authenticated) return; let alive = true; api<Glossary[]>('/v1/me/glossaries').then((rows) => { if (!alive) return; setGlossaryChoices(rows); if (glossaryId && !rows.some((row) => row.id === glossaryId)) setGlossaryId(''); }).catch(() => undefined); return () => { alive = false; }; }, [authenticated, panel]);
   function rememberCaptionLimit(next: number) {
     captionLimitRef.current = next;
@@ -392,16 +466,6 @@ function App() {
     const el = stageRef.current;
     if (el) scrollAnchor.current = el.scrollHeight;
     rememberCaptionLimit(Math.min(end, captionLimitRef.current + CAPTION_PAGE));
-  }
-  useEffect(() => {
-    if (segments.length > 0) return;
-    seenInterim.current.clear();
-    freshCommitted.current.clear();
-  }, [segments.length]);
-  function captionEnterClass(position: number, interim: boolean, total: number) {
-    if (interim) { seenInterim.current.add(position); return ''; }
-    if (!seenInterim.current.has(position) && position === total - 1) freshCommitted.current.add(position);
-    return freshCommitted.current.has(position) ? ' caption-enter' : '';
   }
   useLayoutEffect(() => {
     const el = stageRef.current;
@@ -469,7 +533,9 @@ function App() {
     if (!socket || socket.readyState !== WebSocket.OPEN) return;
     while (audioQueue.current.length && socket.bufferedAmount < 262_144) {
       const next = audioQueue.current.shift();
-      if (next) socket.send(next);
+      if (!next) continue;
+      socket.send(next.pcm);
+      commitSentChunk(latencyClock.current, next);
     }
   }
   async function flushQueuedAudio(socket: WebSocket | null) {
@@ -480,10 +546,11 @@ function App() {
       await new Promise((resolve) => window.setTimeout(resolve, 40));
     }
   }
-  function sendChunk(chunk: ArrayBuffer) {
+  function sendChunk(chunk: ArrayBuffer, capturedAt = performance.now()) {
     if (pausedRef.current) return;
-    audioQueue.current.push(chunk);
-    if (audioQueue.current.length > 200) audioQueue.current.shift();
+    const stamped = stampChunk(chunk.byteLength, capturedAt);
+    audioQueue.current.push({ pcm: chunk, ...stamped });
+    trimQueuedAudio(audioQueue.current);
     if (acceptAudio.current) pumpAudio(socket.current);
   }
   function bindSocket(ws: WebSocket) {
@@ -494,10 +561,13 @@ function App() {
         const data = JSON.parse(event.data) as RealtimeEvent;
         if (data.type === 'ready') {
           if (typeof data.allowedSeconds === 'number') { limitSeconds.current = data.allowedSeconds; readyAt.current = Date.now(); }
+          if (typeof data.receivedAudioMs === 'number') alignSentAudio(latencyClock.current, data.receivedAudioMs);
+          if (!sessionReady.current) startMeasuring(latencyClock.current, performance.now());
+          sessionReady.current = true;
           acceptAudio.current = true;
           pumpAudio(ws);
           if (keepalive.current !== null) window.clearInterval(keepalive.current);
-          keepalive.current = window.setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'keepalive' })); }, 15_000);
+          keepalive.current = window.setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'keepalive' })); }, 10_000);
           if (startupTimer.current !== null) window.clearTimeout(startupTimer.current); startupTimer.current = null;
           setError('');
           updateSessionStatus('running');
@@ -511,18 +581,29 @@ function App() {
           followLatest.current = true;
           publishCaptions([], true);
         }
-        if (data.type === 'transcript') consumeTokens(data.tokens);
+        if (data.type === 'transcript') {
+          if (data.tokens.length) consumeTokens(data.tokens);
+          observeTranscript(latencyClock.current, data, performance.now());
+        }
         if (data.type === 'error') { setError(data.code === 'quota_exhausted' ? tr('额度已用完，本次会话已结束。') : data.code === 'session_limit_reached' ? tr('单次时长已到，本次会话已结束。') : data.message ?? data.code); if (data.code === 'quota_exhausted' || data.code === 'session_limit_reached') void stop(); else { releaseUpstream(); void stop({ alreadyFinished: true }); } }
-        if (data.type === 'finished') { if (data.transcriptId) savedTranscriptId.current = data.transcriptId; releaseUpstream(); void stop({ alreadyFinished: true }); }
+        if (data.type === 'finished') { if (data.reason === 'expired') setError(tr('长时间没有活动，这场翻译已结束。')); if (data.transcriptId) savedTranscriptId.current = data.transcriptId; releaseUpstream(); void stop({ alreadyFinished: true }); }
       } catch { setError(tr('收到无法识别的实时消息。')); releaseUpstream(); void stop({ alreadyFinished: true }); }
     };
-    ws.onerror = () => { if (socket.current === ws) setError(tr('连接中断，正在恢复…')); };
-    ws.onclose = () => {
+    ws.onerror = () => { if (socket.current === ws && sessionReady.current) setError(tr('连接中断，正在恢复…')); };
+    ws.onclose = (event) => {
       if (socket.current !== ws) return;
       readyWait.current?.(false);
       readyWait.current = null;
       if (userStop.current || statusRef.current === 'stopping' || statusRef.current === 'idle') return;
       if (upstreamDone.current) { void stop({ alreadyFinished: true }); return; }
+      /* Nothing to resume if the very first connection never got ready. Retrying
+         it as a dropped session only hid the real cause behind "reconnecting". */
+      if (!sessionReady.current && statusRef.current === 'connecting') {
+        setError(!navigator.onLine ? tr('手机没有联网，请检查网络后重试。') : event.code === 1008 ? tr('翻译服务拒绝了这次连接，请重新开始。') : tr('实时连接失败，请检查网络后重试。'));
+        releaseUpstream();
+        void stop({ alreadyFinished: true });
+        return;
+      }
       if (!recoverLock.current) void recover();
     };
   }
@@ -540,7 +621,7 @@ function App() {
         const session = await api<{ websocketUrl: string; websocketProtocols: string[] }>(`/v1/realtime/sessions/${current}/reconnect`, { method: 'POST' });
         if (userStop.current) break;
         const opened = new Promise<boolean>((resolve) => { readyWait.current = resolve; });
-        bindSocket(new WebSocket(session.websocketUrl, session.websocketProtocols));
+        bindSocket(openSocket(session.websocketUrl, session.websocketProtocols));
         restored = await opened;
         if (restored) break;
       } catch (err) {
@@ -561,7 +642,7 @@ function App() {
   }
   async function ensureAudio(gen: number) {
     if (audio.current) return true;
-    const stream = await createPcmStream(sendChunk, audioSource, () => { if (generation.current === gen) { setError(tr('音频来源已结束，会话已停止。')); void stop(); } }, audioSource === 'microphone' ? micId || undefined : undefined);
+    const stream = await createPcmStream(sendChunk, audioSource, () => { if (generation.current === gen) { setError(tr('音频来源已结束，会话已停止。')); void stop(); } }, audioSource === 'microphone' ? micId || undefined : undefined, (stalled) => { if (generation.current === gen) setAudioStalled(stalled); });
     if (generation.current !== gen) { await stream.stop(); return false; }
     audio.current = stream;
     void listAudioInputs().then(setMics).catch(() => undefined);
@@ -573,9 +654,11 @@ function App() {
     const id = ++generation.current;
     userStop.current = false;
     acceptAudio.current = false;
+    sessionReady.current = false;
+    setAudioStalled(false);
     speakerNamesRef.current = {};
     setSpeakerNames({}); setNamingSpeaker(null); setLiveNotice(''); setClosePrompt(false); closeTitleRef.current = sessionTitle.trim().slice(0, 120);
-    setError(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null;
+    setError(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; latencyClock.current = createLatencyClock(); setLatency(NO_LATENCY); savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null;
     updateSessionStatus('opening');
     try {
       if (!await ensureAudio(id)) return;
@@ -588,13 +671,15 @@ function App() {
       if (generation.current !== id) { setLiveSessionId(null); void api(`/v1/realtime/sessions/${session.sessionId}`, { method: 'DELETE', headers: authToken.current ? { authorization: `Bearer ${authToken.current}` } : undefined }).catch(() => undefined); return; }
       sessionId.current = session.sessionId;
       setLiveSessionId(session.sessionId);
-      bindSocket(new WebSocket(session.websocketUrl, session.websocketProtocols));
+      bindSocket(openSocket(session.websocketUrl, session.websocketProtocols));
     } catch (err) {
       if (generation.current !== id) return;
       const cause = err as DOMException;
       if (err instanceof ApiError && err.code === 'session_conflict') { setError(tr('上一场翻译还在占用额度。')); const fallbackId = err.sessionId ?? null; if (fallbackId) setConflictSession({ id: fallbackId, mode, status: 'active', title: null, languageA: '', languageB: null, targetLanguage: null }); void api<{ session: ActiveSession | null }>('/v1/realtime/sessions/active').then((result) => { if (statusRef.current !== 'idle' || sessionId.current) return; if (result.session) setConflictSession(result.session); }).catch(() => undefined); }
       else if (err instanceof ApiError && err.code === 'quota_exhausted') setError(tr('额度已用完，无法开始新的翻译。'));
-      else setError(cause.name === 'NotAllowedError' || cause.name === 'NotFoundError' ? tr('音频权限被拒绝，请在浏览器中允许访问后重试。') : err instanceof Error ? tr(err.message) : tr('无法开始翻译'));
+      else if (cause.name === 'NotAllowedError') setError(tr('音频权限被拒绝，请在浏览器中允许访问后重试。'));
+      else if (cause.name === 'NotFoundError' || cause.name === 'OverconstrainedError') { setMicId(''); setError(tr('当前设备打不开所选麦克风，请改用系统默认麦克风后重试。')); }
+      else setError(err instanceof Error && err.message ? tr(err.message) : tr('无法开始翻译'));
       void stop();
     }
   }
@@ -635,6 +720,8 @@ function App() {
     limitSeconds.current = null;
     readyAt.current = null;
     setRemainingSeconds(null);
+    setAudioStalled(false);
+    sessionReady.current = false;
     updateSessionStatus('idle');
     closeTitleRef.current = '';
     setLiveSessionId(null);
@@ -762,6 +849,7 @@ function App() {
     closePrompt ? { id: 'close', node: <form className="close-title" onSubmit={(event) => { event.preventDefault(); confirmClose(); }}><label>{tr('这场翻译的名称')}<input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} autoFocus /></label><button className="primary-button" type="submit">{tr('保存并结束')}</button><button type="button" className="link-button" onClick={() => setClosePrompt(false)}>{tr('继续翻译')}</button></form> } : null,
     namingSpeaker ? { id: 'speaker', node: <form className="speaker-rename-form" onSubmit={(event) => { event.preventDefault(); renameLiveSpeaker(); }}><label>{tr('改名为')}<input value={speakerDraft} onChange={(event) => setSpeakerDraft(event.target.value)} aria-label={tr('说话人名称')} autoFocus /></label><button className="secondary-button" type="submit">{tr('保存')}</button><button type="button" className="secondary-button" onClick={() => setNamingSpeaker(null)}>{tr('取消')}</button></form> } : null,
     error ? { id: 'error', node: <div className="error-banner" role="alert">{error}</div> } : null,
+    audioStalled && sessionLive ? { id: 'stalled', node: <div className="error-banner time-warning-banner" role="status">{tr('收音被系统暂停了，点一下屏幕继续。')}</div> } : null,
     timeWarning ? { id: 'time', node: <div className="error-banner time-warning-banner" role="status">{tr('本次会话即将结束，剩余')} {formatRemain(remainingSeconds ?? 0)}</div> } : null,
     conflictSession && sessionStatus === 'idle' ? { id: 'conflict', node: <div className="record-notice" role="status"><p>{tr('上一场翻译还在占用额度。')}</p><button type="button" className="primary-button" onClick={() => void resumeConflict()}>{tr('恢复这场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(false)}>{tr('结束上一场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(true)}>{tr('结束上一场并开始')}</button></div> } : null,
     endedTranscriptId && sessionStatus === 'idle' ? { id: 'saved', node: <div className="session-saved" role="status"><span>{tr('本次记录已保存。')}</span><button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(endedTranscriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button><button type="button" className="link-button" onClick={() => setEndedTranscriptId(null)}>{tr('关闭')}</button></div> } : null,
@@ -775,13 +863,14 @@ function App() {
       entitlement={entitlement}
       serviceStatus={serviceStatus}
       isAdmin={profile?.role === 'admin'}
-      live={phone && (running || sessionStatus === 'reconnecting') ? { label: currentLabel, remaining: remainingSeconds !== null ? formatRemain(remainingSeconds) : '', warning: Boolean(timeWarning), paused } : null}
+      live={phone && sessionLive ? { label: currentLabel, remaining: remainingSeconds !== null ? formatRemain(remainingSeconds) : '', warning: Boolean(timeWarning), paused } : null}
       onPanel={setPanel}
       onLogout={() => void logout()}
     />
     <main className="workspace">
       <section className="stage">
-        {!phone && captionsVisible && <CaptionToolbar view={captionView} onView={setCaptionView} onCopy={() => void copyLive()} onExport={exportLive} />}
+        {!phone && captionsVisible && <CaptionToolbar view={captionView} onView={setCaptionView} onCopy={() => void copyLive()} onExport={exportLive} latency={sessionLive ? <LatencyBadge readout={latency} paused={paused || audioStalled} /> : null} />}
+        {phone && sessionLive && <div className="stage-latency"><LatencyBadge readout={latency} paused={paused || audioStalled} /></div>}
         <CaptionStage
           stageRef={stageRef}
           segments={segments}
@@ -794,7 +883,6 @@ function App() {
           languageB={languageB}
           speakerNames={speakerNames}
           withToolbar={!phone && captionsVisible}
-          enterClass={captionEnterClass}
           onScroll={onStageScroll}
           onShowEarlier={showEarlierCaptions}
           onRenameSpeaker={(speaker) => { setNamingSpeaker(speaker); setSpeakerDraft(speakerNames[speaker ?? ''] ?? speaker ?? ''); }}
@@ -847,7 +935,16 @@ function App() {
         onCaptionSize={setCaptionSize}
         onFullscreen={() => void toggleFullscreen()}
         onPause={togglePause}
-        onPrimary={() => void (closePrompt ? confirmClose() : sessionStatus === 'idle' ? start() : requestClose())}
+        onCancel={() => { if (statusRef.current === 'opening' || statusRef.current === 'connecting') void stop(); }}
+        onPrimary={() => {
+          if (closePrompt) { confirmClose(); return; }
+          const status = statusRef.current;
+          /* Opening the mic on a phone shows a permission sheet. The tap that
+             dismisses it lands on this same button and used to cancel the session
+             before any audio was sent. */
+          if (status === 'idle') { void start(); return; }
+          if (status === 'running' || status === 'reconnecting') requestClose();
+        }}
         onCopy={() => void copyLive()}
         onExport={exportLive}
       />

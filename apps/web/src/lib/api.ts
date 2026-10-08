@@ -1,5 +1,13 @@
 const API_URL = import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? 'http://localhost:3000' : '');
 export const apiOrigin = API_URL;
+
+/* An https page may only open wss://. A proxy that drops X-Forwarded-Proto makes
+   the API hand out ws://, which phone browsers refuse outright. */
+export function openSocket(url: string, protocols?: string[]) {
+  const target = new URL(url, window.location.href);
+  if (window.location.protocol === 'https:' && target.protocol === 'ws:') target.protocol = 'wss:';
+  return new WebSocket(target.toString(), protocols);
+}
 const tokenKey = 'linguaflow_access_token';
 
 export const getToken = () => localStorage.getItem(tokenKey);
@@ -20,8 +28,15 @@ export class ApiError extends Error {
 function tokenPayload() {
   const token = getToken();
   if (!token) return null;
-  try { return JSON.parse(atob(token.split('.')[1])) as { exp?: number }; }
-  catch { return null; }
+  try {
+    const part = token.split('.')[1];
+    if (!part) return null;
+    /* JWTs are base64url. atob rejects "-" and "_" and, on some phone browsers,
+       a payload that is not padded to a multiple of 4. A failed decode used to
+       look like an expired session and bounce the user back to sign-in. */
+    const padded = part.replace(/-/g, '+').replace(/_/g, '/').padEnd(Math.ceil(part.length / 4) * 4, '=');
+    return JSON.parse(atob(padded)) as { exp?: number };
+  } catch { return null; }
 }
 
 export const isTokenExpired = () => {

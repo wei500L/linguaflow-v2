@@ -33,8 +33,8 @@ export type TranscriptToken = {
 };
 
 export type RealtimeEvent =
-  | { type: 'ready'; sessionId: string; allowedSeconds?: number }
-  | { type: 'transcript'; tokens: TranscriptToken[] }
+  | { type: 'ready'; sessionId: string; allowedSeconds?: number; receivedAudioMs?: number }
+  | { type: 'transcript'; tokens: TranscriptToken[]; totalAudioProcMs?: number }
   | { type: 'snapshot'; tokens: TranscriptToken[]; speakerNames?: Record<string, string> }
   | { type: 'error'; code: string; message?: string }
   | { type: 'finished'; reason?: string; transcriptId?: string | null };

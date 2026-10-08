@@ -10,6 +10,7 @@ import { audienceIsOpen, newAudienceToken, revokeAudienceShare } from '../lib/au
 import { audienceCount, closeActiveSession, dropAudience, handleRealtimeSocket, holdSession } from '../realtime/proxy.js';
 import { glossaryInjection, sameLanguageResponse, type GlossaryMeta, type SonioxSessionInput } from '../realtime/soniox.js';
 import { settleUsage } from '../lib/quota.js';
+import { socketUrl } from '../lib/socket-url.js';
 
 export const quotaExhaustedMessage = '额度已用完，无法开始新的翻译。';
 export const sessionConflictMessage = '上一场翻译还在占用额度。';
@@ -57,9 +58,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
     });
     if ('sent' in session) return session;
     const preview = body.glossaryId && glossaryMeta ? glossaryInjection(sessionInput(body, session.id), await db.select({ source: glossaryTerms.source, target: glossaryTerms.target, pinned: glossaryTerms.pinned }).from(glossaryTerms).where(eq(glossaryTerms.glossaryId, body.glossaryId)), glossaryMeta) : { used: 0, dropped: 0, droppedTerms: [] as string[] };
-    const host = request.headers.host ?? 'localhost:3000';
-    const protocol = request.headers['x-forwarded-proto'] === 'https' ? 'wss' : 'ws';
-    return { sessionId: session.id, maxSessionSeconds: session.maxSessionSeconds, websocketUrl: `${protocol}://${host}/v1/realtime/ws`, websocketProtocols: ['realtime.v1', sessionToken], glossaryTermsUsed: preview.used, glossaryTermsDropped: preview.dropped };
+    return { sessionId: session.id, maxSessionSeconds: session.maxSessionSeconds, websocketUrl: socketUrl(request, '/v1/realtime/ws'), websocketProtocols: ['realtime.v1', sessionToken], glossaryTermsUsed: preview.used, glossaryTermsDropped: preview.dropped };
   });
 
   app.get('/v1/realtime/sessions/active', { preHandler: app.authenticate }, async (request) => {
@@ -76,9 +75,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
     if (!holdSession(id)) return reply.code(409).send({ code: 'session_not_resumable', message: '这场翻译正在另一台设备上继续，或已经不在服务器上。' });
     const sessionToken = crypto.randomBytes(32).toString('base64url');
     await db.update(realtimeSessions).set({ sessionTokenHash: crypto.createHash('sha256').update(sessionToken).digest('hex'), status: 'reconnecting', claimedAt: new Date() }).where(eq(realtimeSessions.id, id));
-    const host = request.headers.host ?? 'localhost:3000';
-    const protocol = request.headers['x-forwarded-proto'] === 'https' ? 'wss' : 'ws';
-    return { sessionId: id, websocketUrl: `${protocol}://${host}/v1/realtime/ws`, websocketProtocols: ['realtime.v1', sessionToken] };
+    return { sessionId: id, websocketUrl: socketUrl(request, '/v1/realtime/ws'), websocketProtocols: ['realtime.v1', sessionToken] };
   });
 
   app.get('/v1/realtime/sessions/:id/audience', { preHandler: app.authenticate }, async (request, reply) => {

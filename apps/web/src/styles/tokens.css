@@ -5,36 +5,64 @@
 :root {
   color-scheme: light;
 
-  --bg: #fbfbfa;
-  --bg-sunken: #f2f3f1;
+  --bg: #fafafa;
+  --bg-sunken: #f4f4f5;
   --surface: #ffffff;
-  --surface-2: #f3f4f2;
-  --surface-3: #e9ebe8;
-  --border: #e3e6e2;
-  --border-strong: #c8cfc9;
+  --surface-2: #f4f4f5;
+  --surface-3: #e9e9eb;
+  --border: #e6e6e8;
+  --border-strong: #d0d0d4;
 
-  --text: #14191a;
-  --text-muted: #5d6866;
-  --text-faint: #8b9592;
+  --text: #0a0a0b;
+  --text-muted: #5f5f66;
+  --text-faint: #7a7a82;
 
-  --accent: #0f766e;
-  --accent-hover: #0c5f58;
+  /* The accent is ink, not a hue: buttons and selected states read as black on white. */
+  --accent: #111113;
+  --accent-hover: #2a2a2e;
   --accent-contrast: #ffffff;
-  --accent-soft: #e3f1ee;
-  --accent-line: #bcdcd6;
+  --accent-soft: #f1f1f2;
+  --accent-line: #dcdcdf;
 
-  --danger: #b42318;
-  --danger-soft: #fdf0ee;
-  --danger-line: #f3cec9;
-  --warn: #b54708;
-  --warn-soft: #fdf5e8;
-  --warn-line: #ecd9b0;
-  --ok: #067647;
+  /* The only hue in the UI. Reserved for focus, inline links and the live indicator. */
+  --signal: #2458e6;
+  --signal-soft: #2458e614;
+  --focus-ring: 0 0 0 3px #2458e633;
 
-  --shadow-1: 0 1px 2px #14191a0d;
-  --shadow-2: 0 8px 24px #14191a14;
-  --shadow-3: 0 20px 48px #14191a1f;
-  --shadow-up: 0 -8px 28px #14191a14;
+  --danger: #c0352b;
+  --danger-soft: #fdf2f1;
+  --danger-line: #f1d0cc;
+  --warn: #a15c07;
+  --warn-soft: #fdf7ec;
+  --warn-line: #ecdcb8;
+  --ok: #16794a;
+  --on-danger: #ffffff;
+  --on-warn: #ffffff;
+  /* The record button is a filled control, so it keeps a deep red with white text
+     in both themes instead of the pale dark-mode danger text colour. */
+  --record: #c8302b;
+  --record-hover: #ad2823;
+  --on-record: #ffffff;
+
+  --overlay: #0a0a0b66;
+
+  --shadow-1: 0 1px 2px #0000000d;
+  --shadow-2: 0 1px 2px #0000000a, 0 8px 24px -6px #00000017;
+  --shadow-3: 0 2px 4px #0000000a, 0 24px 48px -12px #0000002e;
+  --shadow-up: 0 -8px 28px -6px #00000017;
+
+  /* The projector stage and audience sheet are always dark, whatever the theme. */
+  --proj-bg: #000000;
+  --proj-surface: #141414;
+  --proj-text: #f5f5f5;
+  --proj-dim: #9a9a9f;
+  --proj-faint: #6e6e73;
+  --proj-edge: #8a8a8f;
+  --proj-accent: #d4d4d8;
+  --proj-line: #ffffff17;
+  --proj-scrim: #00000047;
+  --proj-veil: #050505e6;
+  --proj-danger: #ff9f95;
 
   /* Spacing, 4px base. */
   --s1: 4px;
@@ -62,7 +90,7 @@
   --text-3xl: clamp(30px, 5vw, 44px);
   --control-text: 16px;
 
-  /* Caption sizes scale with the viewport so one setting works on a phone and a laptop. */
+  /* Fallback caption sizes. The workspace stage overrides these with its own width. */
   --caption-lead: clamp(20px, 5.2vw, 30px);
   --caption-sub: clamp(13px, 3.4vw, 16px);
 
@@ -90,37 +118,48 @@
 [data-theme='dark'] {
   color-scheme: dark;
 
-  --bg: #0c1110;
-  --bg-sunken: #080c0b;
-  --surface: #141a19;
-  --surface-2: #1c2322;
-  --surface-3: #252d2c;
-  --border: #ffffff14;
-  --border-strong: #ffffff2b;
+  /* True black: on an OLED phone the unlit background is what keeps the screen dim. */
+  --bg: #000000;
+  --bg-sunken: #000000;
+  --surface: #0c0c0d;
+  --surface-2: #17171a;
+  --surface-3: #222226;
+  --border: #ffffff1c;
+  --border-strong: #ffffff33;
 
-  --text: #f2f5f4;
-  --text-muted: #a2aeab;
-  --text-faint: #7b8785;
+  --text: #f4f4f5;
+  --text-muted: #a1a1aa;
+  --text-faint: #75757d;
 
-  /* The accent inverts role in dark: a bright mint carrying dark text. */
-  --accent: #4fd1c5;
-  --accent-hover: #6ee0d5;
-  --accent-contrast: #06201d;
-  --accent-soft: #4fd1c51f;
-  --accent-line: #4fd1c54d;
+  /* In dark the ink inverts: near-white controls carrying near-black text. */
+  --accent: #f4f4f5;
+  --accent-hover: #dcdce0;
+  --accent-contrast: #0a0a0b;
+  --accent-soft: #ffffff0d;
+  --accent-line: #ffffff24;
 
-  --danger: #ff9e91;
-  --danger-soft: #ff9e9114;
-  --danger-line: #ff9e9138;
-  --warn: #f0c36a;
-  --warn-soft: #f0c36a14;
-  --warn-line: #f0c36a38;
-  --ok: #6ee7a8;
+  --signal: #7ea6ff;
+  --signal-soft: #7ea6ff1a;
+  --focus-ring: 0 0 0 3px #7ea6ff40;
 
-  --shadow-1: 0 1px 2px #00000052;
-  --shadow-2: 0 8px 24px #00000066;
-  --shadow-3: 0 20px 48px #00000080;
-  --shadow-up: 0 -8px 28px #00000066;
+  --danger: #f2a19a;
+  --danger-soft: #f2a19a12;
+  --danger-line: #f2a19a33;
+  --warn: #e6c27a;
+  --warn-soft: #e6c27a12;
+  --warn-line: #e6c27a33;
+  --ok: #7dd3a8;
+  --on-danger: #1a0705;
+  --on-warn: #1a1204;
+  --record: #c93a34;
+  --record-hover: #d9483f;
+
+  --overlay: #000000a3;
+
+  --shadow-1: 0 1px 2px #00000066;
+  --shadow-2: 0 0 0 1px #ffffff0a, 0 8px 24px -6px #000000a3;
+  --shadow-3: 0 0 0 1px #ffffff0f, 0 24px 48px -12px #000000cc;
+  --shadow-up: 0 -8px 28px -6px #000000a3;
 }
 
 @media (min-width: 640px) {

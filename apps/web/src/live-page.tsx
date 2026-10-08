@@ -1,6 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, type TranscriptToken } from '@linguaflow/shared';
-import { apiOrigin } from './lib/api';
+import { apiOrigin, openSocket } from './lib/api';
 import { READING_QUERY, useMediaQuery } from './lib/breakpoints';
 import { lockProgrammaticScroll, nudgeToBottom } from './lib/follow-scroll';
 import { tr, useLang } from './lib/i18n';
@@ -135,7 +135,7 @@ export function LivePage({ token }: { token: string }) {
       if (payload.phase === 'live' && payload.websocketUrl && !socket) {
         window.clearTimeout(timer);
         if (failures === 0) setReconnecting(false);
-        socket = new WebSocket(payload.websocketUrl, payload.websocketProtocols);
+        socket = openSocket(payload.websocketUrl, payload.websocketProtocols);
         socket.onmessage = (event) => {
           if (!alive) return;
           let data: { type?: string; tokens?: TranscriptToken[]; speakerNames?: Record<string, string>; names?: Record<string, string>; title?: string };

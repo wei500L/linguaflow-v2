@@ -17,7 +17,7 @@ export async function sendCode(emailInput: string, purpose: string) {
   const code = String(crypto.randomInt(100000, 1000000));
   await db.insert(authCodes).values({ email, purpose, codeHash: codeHash(code), expiresAt: new Date(Date.now() + 10 * 60 * 1000) });
   if (config.smtp.host && config.smtp.user && config.smtp.password) {
-    const transport = nodemailer.createTransport({ host: config.smtp.host, port: config.smtp.port, secure: config.smtp.port === 465, auth: { user: config.smtp.user, pass: config.smtp.password } });
+    const transport = nodemailer.createTransport({ host: config.smtp.host, port: config.smtp.port, secure: config.smtp.secure, auth: { user: config.smtp.user, pass: config.smtp.password }, connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 20_000 });
     await transport.sendMail({ from: config.smtp.from, to: email, subject: 'Your LinguaFlow verification code', text: `Your verification code is ${code}. It expires in 10 minutes.` });
   } else if (config.nodeEnv !== 'production') {
     console.info(`[LinguaFlow] verification code for ${email}: ${code}`);
@@ -67,7 +67,11 @@ export async function bootstrapOwner(emailInput: string, password: string) {
   const email = normalizeEmail(emailInput);
   const existing = await findUser(email);
   const user = existing ?? await createUser(email, password);
-  if (existing) await db.update(users).set({ passwordHash: await argon2.hash(password), role: 'admin' }).where(eq(users.id, existing.id));
+  if (!existing) {
+    await db.update(users).set({ role: 'admin' }).where(eq(users.id, user.id));
+  } else if (existing.role !== 'admin') {
+    await db.update(users).set({ role: 'admin' }).where(eq(users.id, existing.id));
+  }
   await ensureEntitlement(user.id);
   await db.update(entitlements).set({ plan: 'ultra', status: 'active', planExpiresAt: null }).where(eq(entitlements.userId, user.id));
   return user;

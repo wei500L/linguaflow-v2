@@ -28,15 +28,17 @@
 
 .share-card h1 {
   font-size: var(--text-2xl);
-  letter-spacing: -.02em;
+  font-weight: 650;
+  letter-spacing: -.03em;
   text-wrap: balance;
 }
 
 .share-card h2 {
   margin: var(--s4) 0 0;
-  color: var(--accent);
-  font-size: var(--text-base);
-  letter-spacing: .02em;
+  color: var(--text-faint);
+  font-size: var(--text-xs);
+  font-weight: 650;
+  letter-spacing: .1em;
   text-transform: uppercase;
 }
 
@@ -100,8 +102,8 @@
   align-items: center;
   min-height: var(--tap);
   cursor: pointer;
-  color: var(--accent);
-  font-weight: 700;
+  color: var(--text);
+  font-weight: 600;
 }
 
 .share-export .share-tools {
