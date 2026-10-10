@@ -20,8 +20,10 @@
 
 .projection-edge {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
   justify-content: space-between;
-  gap: var(--s4);
+  gap: var(--s3) var(--s4);
   padding: var(--s5) 7vw 0;
   color: var(--proj-edge);
   font-size: var(--text-sm);
@@ -29,9 +31,23 @@
   text-transform: uppercase;
 }
 
-.projection-edge span:last-child {
+.projection-edge span:last-of-type {
   letter-spacing: .14em;
   white-space: nowrap;
+}
+
+.projection-cast {
+  flex: none;
+  min-height: var(--tap);
+  padding: 0 var(--s3);
+  border: 1px solid var(--proj-line);
+  border-radius: var(--r-full);
+  background: transparent;
+  color: var(--proj-text);
+  font-size: var(--text-sm);
+  font-weight: 650;
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 .projection-error,

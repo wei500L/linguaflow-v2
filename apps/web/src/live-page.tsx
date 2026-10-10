@@ -326,6 +326,7 @@ export function LivePage({ token }: { token: string }) {
     <div className="projection-edge">
       <span>{segments.length ? title : 'LinguaFlow'}</span>
       <span>{direction}</span>
+      {reading && <button type="button" className="projection-cast" onClick={() => void toggleFullscreen()}>{tr('投影')}</button>}
     </div>
     {meta?.phase === 'saving' && segments.length > 0 && <p className="projection-status" role="status">{tr('正在保存这场翻译…')}</p>}
     {savedOnStage && <div className="projection-fault" role="status"><p className="projection-status">{fullscreen ? tr('这场翻译已保存。退出全屏后可以回看。') : tr('这场翻译已保存。')}</p>{!fullscreen && <button type="button" className="projection-retry" onClick={() => { window.location.assign(`/s/${encodeURIComponent(token)}`); }}>{tr('查看这场记录')}</button>}</div>}

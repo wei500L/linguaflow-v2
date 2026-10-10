@@ -80,6 +80,7 @@ const english: Record<string, string> = {
   '访谈纪要': 'Interview notes', '简报': 'Briefing', '分享密码': 'Share password', '留空则不需要密码': 'Leave blank for no password', '分享内容': 'What to share', '全文': 'Full record', '只发纪要': 'Summary only', '有密码': 'Password', '查看 {count} 次': 'Viewed {count} times', '重新签发': 'Issue a new link', '打开': 'Open', '打开这场分享需要密码。': 'This share needs a password.', '分享密码不正确。': 'That password is wrong.', '需要分享密码。': 'This share needs a password.', '这份分享只有纪要。': 'This share includes only the summary.', '找不到文件夹。': 'Folder not found.', '找不到这条待办。': 'Task not found.', '没有要保存的内容。': 'Nothing to save.',
   '筛选': 'Filters', '清除筛选': 'Clear filters', '返回列表': 'Back to list', '记录信息': 'Details', '录音': 'Recording', '导出': 'Export', '删除这条记录': 'Delete this record',
   '打开套餐与激活码': 'Open plans and activation codes',
+  '投影': 'Project',
   '这台设备已经使用过免费额度，新的免费账号不能再开始翻译。开通套餐后可以继续使用。': 'This device already used the free quota, so a new free account cannot start a translation. A paid plan can continue.',
   '网络中断了，字幕还留在这个页面上。': 'The network dropped. These captions stay on this page.',
   '连不上这场翻译。请检查网络后再试。': 'This session could not be reached. Check the network and try again.',

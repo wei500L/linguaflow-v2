@@ -101,7 +101,11 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
       if (bootstrapped.current === sessionId) return;
       bootstrapped.current = sessionId;
       if (!classroom || isRevoked(sessionId) || classDismissed.has(sessionId)) return;
-      if (result.audience && !classStarted.has(sessionId)) return;
+      if (result.audience && !classStarted.has(sessionId)) {
+        classStarted.add(sessionId);
+        if (result.audience.token) setOpen(true);
+        return;
+      }
       if (!classStarted.has(sessionId)) {
         classStarted.add(sessionId);
         void publishRef.current(false, 168, false, true);

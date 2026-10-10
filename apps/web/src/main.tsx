@@ -733,7 +733,7 @@ function App() {
         onExport={exportLive}
       />
     </main>
-    {panel === 'transcripts' && <TranscriptPanel focusId={focusTranscriptId} onOpenAccount={() => setPanel('account')} onClose={() => { setPanel('none'); setFocusTranscriptId(null); }} />}
+    {panel === 'transcripts' && <TranscriptPanel focusId={focusTranscriptId} onOpenAccount={() => setPanel('account')} onOpenPlans={() => setPanel('pricing')} onClose={() => { setPanel('none'); setFocusTranscriptId(null); }} />}
     {panel === 'glossary' && <GlossaryPanel languageA={languageA} languageB={languageB} activeId={glossaryId} onActive={setGlossaryId} onList={setGlossaryChoices} onClose={() => setPanel('none')} />}
     {panel === 'pricing' && <PricingPanel entitlement={entitlement} onRefresh={() => api<Entitlement>('/v1/me/entitlement').then(setEntitlement)} onOpenInvite={() => setPanel('invite')} onClose={() => setPanel('none')} />}
     {panel === 'invite' && <InvitePanel onClose={() => setPanel('none')} />}
