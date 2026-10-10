@@ -4,7 +4,7 @@ import { LanguageToggle } from './language-toggle';
 import { ThemeToggle } from './theme-toggle';
 
 const scenes = [
-  ['会议', '把会议上的话实时变成双语字幕，结束后导出纪要。'],
+  ['会议', '把会议上的话实时变成双语字幕，结束后可以导出字幕。纪要需要平台模型或自备密钥。'],
   ['课堂', '老师讲一种语言，学生看着自己的语言。'],
   ['跨语言对话', '两个人各说各的语言，字幕分列两边。']
 ] as const;
@@ -75,8 +75,8 @@ export function MarketingPage() {
     </section>
     <section className="marketing-section">
       <p className="eyebrow">{tr('了解套餐')}</p>
-      <h2>{tr('功能相同，时长不同')}</h2>
-      <p className="marketing-note">{tr('四个套餐都能使用实时字幕、术语库、录音、导出和纪要。差别是每月分钟和单次时长。')}</p>
+      <h2>{tr('实时字幕相同，时长不同')}</h2>
+      <p className="marketing-note">{tr('四个套餐都能使用实时字幕、术语库、录音和导出。差别是每月分钟和单次时长。纪要需要平台模型，或在账户里保存自己的密钥。')}</p>
       <p className="marketing-note">{tr('不能在应用内购买。拿到激活码后，在工作区里兑换。')}</p>
       <div className="plan-grid marketing-plans">
         {(Object.keys(PLANS) as Array<keyof typeof PLANS>).map((plan) => <article className="plan-card" key={plan}><p>{PLANS[plan].label}</p><strong>{minutes(PLANS[plan].monthlySeconds)}</strong><small>{tr('单次最多')} {Math.round(PLANS[plan].maxSessionSeconds / 60)} {tr('分钟')}</small><small>{tr(planFit[plan])}</small></article>)}

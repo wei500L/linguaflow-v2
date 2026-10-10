@@ -42,6 +42,31 @@
 .projection-error { color: var(--proj-danger); }
 .projection-status { color: var(--proj-accent); }
 
+.projection-fault {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+  margin: var(--s3) 7vw 0;
+}
+
+.projection-page.is-reading .projection-fault .projection-error,
+.projection-page.is-reading .projection-fault .projection-status,
+.projection-fault .projection-error,
+.projection-fault .projection-status {
+  margin: 0;
+}
+
+.projection-retry {
+  min-height: var(--tap);
+  padding: 0 var(--s4);
+  border: 0;
+  border-radius: var(--r-full);
+  background: var(--proj-text);
+  color: var(--proj-bg);
+  font-weight: 700;
+}
+
 .projection-stage {
   display: flex;
   flex: 1;
@@ -306,7 +331,8 @@
 }
 
 .projection-page.is-reading .projection-error,
-.projection-page.is-reading .projection-status {
+.projection-page.is-reading .projection-status,
+.projection-page.is-reading .projection-fault {
   margin: var(--s2) max(var(--s4), var(--safe-left)) 0;
   font-size: var(--text-sm);
 }

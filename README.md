@@ -12,7 +12,7 @@ pnpm --filter @linguaflow/api db:migrate
 pnpm dev
 ```
 
-开发环境没有 SMTP 配置时，验证码会输出到 API 日志；生产环境必须配置 SMTP 和 `SONIOX_API_KEY`。
+开发环境没有 SMTP 配置时，验证码会输出到 API 日志。生产栈必须把 `NODE_ENV` 设为 `production`（`docker-compose.prod.yml` 会设置），并且配置 SMTP 和 `SONIOX_API_KEY`。SMTP、`JWT_SECRET` 或 `ADMIN_EMAIL` 缺失时，API 会拒绝启动，不会使用开发用的固定密钥，也不会把验证码打进日志。
 
 会话录音写到 `RECORDINGS_DIR`（默认 `data/recordings`）。装有 ffmpeg 时会转成 64 kbps MP3，否则保留 WAV。PDF 导出需要中文字体，用 `PDF_FONT_PATH` 指向一个 TTF/OTF；Docker 镜像会自带 Noto Sans SC。总结模型在字幕库里按用户保存，请求由 API 服务器发出，所以地址必须是服务器能访问的公网 `https`，或本机开发时的 `http://127.0.0.1`。
 
@@ -52,4 +52,4 @@ docker compose up --build
 
 - 本目录与旧的 `live` 项目完全隔离。
 - Soniox API key、数据库密码和生产密钥只通过环境变量提供，不提交到 Git。
-- `apps/api/drizzle` 保存数据库迁移；修改 schema 后重新运行 `pnpm --filter @linguaflow/api db:generate`。
+- `apps/api/drizzle` 保存数据库迁移。快照基线是最新一条迁移，不要对着 `0004` 生成。修改 schema 后重新运行 `pnpm --filter @linguaflow/api db:generate`，并确认新 SQL 只包含这次的差异。

@@ -38,7 +38,6 @@ export type SonioxContext = {
 };
 
 export type SonioxConfig = {
-  api_key: string;
   model: 'stt-rt-v5';
   audio_format: 'pcm_s16le';
   sample_rate: 16000;
@@ -180,14 +179,13 @@ export function glossaryInjection(session: SonioxSessionInput, terms: GlossaryTe
   return { ...packUnits(contextGeneral(session, glossary), units), aligned };
 }
 
-export function buildSonioxConfig(apiKey: string, session: SonioxSessionInput, terms: GlossaryTermInput[], glossary?: GlossaryMeta | null): SonioxConfig {
+export function buildSonioxConfig(session: SonioxSessionInput, terms: GlossaryTermInput[], glossary?: GlossaryMeta | null): SonioxConfig {
   const oneWay = session.mode === 'one_way';
   const source = languageCode(session.languageA);
   const target = languageCode(oneWay ? session.targetLanguage : session.languageB);
   const languageHints = [...new Set(oneWay ? [source] : [source, target])].filter(Boolean);
   const packed = glossaryInjection(session, terms, glossary);
   const config: SonioxConfig = {
-    api_key: apiKey,
     model: 'stt-rt-v5',
     audio_format: 'pcm_s16le',
     sample_rate: 16000,

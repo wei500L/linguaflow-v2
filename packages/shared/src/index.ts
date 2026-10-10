@@ -106,13 +106,17 @@ function blankTurn(): CaptionTurn {
   return { source: '', translation: '', interim: false };
 }
 
+type TurnBoundary = { at: number; endMs?: number; restStartMs?: number; translated: boolean };
+
 export type CaptionFold = {
   committed: CaptionTurn[];
   open: CaptionTurn | null;
+  sentence: TurnBoundary | null;
+  clause: TurnBoundary | null;
 };
 
 export function createCaptionFold(): CaptionFold {
-  return { committed: [], open: null };
+  return { committed: [], open: null, sentence: null, clause: null };
 }
 
 function languageCode(value?: string) {
@@ -132,11 +136,64 @@ function sameLanguage(current: string | undefined, next: string | undefined) {
 function commitOpenTurn(state: CaptionFold) {
   const current = state.open;
   state.open = null;
+  state.sentence = null;
+  state.clause = null;
   if (!current || !(current.source.trim() || current.translation.trim())) return;
   current.source = current.source.trim();
   current.translation = current.translation.trim();
   current.interim = false;
   state.committed.push(current);
+}
+
+export const SOFT_TURN_CHARS = 240;
+export const CLAUSE_TURN_CHARS = 360;
+export const HARD_TURN_CHARS = 720;
+export const FORCE_TURN_CHARS = 1200;
+export const DENSE_TURN_LIMITS = { soft: 80, clause: 120, hard: 240, force: 400 };
+const DENSE_LANGUAGES = new Set(['zh', 'ja', 'yue']);
+const clauseEnding = /[,;:，；：、。！？!?．.…]$/;
+
+/* CJK packs roughly three times more speech into each character, so its turns close at shorter lengths. */
+export function turnLimits(language?: string) {
+  return DENSE_LANGUAGES.has(languageCode(language)) ? DENSE_TURN_LIMITS : { soft: SOFT_TURN_CHARS, clause: CLAUSE_TURN_CHARS, hard: HARD_TURN_CHARS, force: FORCE_TURN_CHARS };
+}
+
+/* Soniox translates in clause-sized chunks and streams each one after its source chunk, sometimes after the first words of the
+   next source chunk, while translation tokens land on whichever turn is open. A long turn is therefore cut at the latest
+   source sentence end, or for very long sentences the latest clause end, once a translated chunk end arrives after it;
+   source words already past that point move to the next turn.
+   Sentence counts are not compared because translations merge, split, and drop filler sentences. */
+function splitAtBoundary(state: CaptionFold, boundary: TurnBoundary) {
+  const open = state.open;
+  if (!open) return;
+  const rest: CaptionTurn = { source: open.source.slice(boundary.at), translation: '', language: open.language, speaker: open.speaker, startMs: boundary.restStartMs, endMs: open.endMs, interim: false };
+  open.source = open.source.slice(0, boundary.at);
+  if (boundary.endMs !== undefined) open.endMs = boundary.endMs;
+  commitOpenTurn(state);
+  if (rest.source.trim()) state.open = rest;
+}
+
+function breakBefore(state: CaptionFold, open: CaptionTurn, next: string): TurnBoundary | 'now' | null {
+  const limits = turnLimits(open.language);
+  const reaches = (boundary: TurnBoundary, length: number) => open.source.slice(0, boundary.at).trim().length >= length;
+  const sentence = state.sentence?.translated ? state.sentence : null;
+  const clause = state.clause?.translated ? state.clause : null;
+  // Cutting before the furthest translated point would push already translated source into the next turn.
+  if (clause && (!sentence || clause.at > sentence.at)) {
+    if (reaches(clause, limits.clause)) return clause;
+  } else if (sentence && reaches(sentence, limits.soft)) return sentence;
+  const source = open.source.trim();
+  if (source.length >= limits.hard && sentenceEnding.test(source)) return 'now';
+  if (source.length >= limits.force && (limits === DENSE_TURN_LIMITS || /^\s/.test(next))) return 'now';
+  return null;
+}
+
+function markSourceEnd(state: CaptionFold, open: CaptionTurn, startMs: number | undefined, inline: boolean) {
+  for (const boundary of [state.sentence, state.clause]) if (boundary && boundary.restStartMs === undefined) boundary.restStartMs = startMs;
+  const source = open.source.trim();
+  const mark = (): TurnBoundary => ({ at: open.source.length, endMs: open.endMs, translated: inline });
+  if (sentenceEnding.test(source)) state.sentence = mark();
+  if (clauseEnding.test(source)) state.clause = mark();
 }
 
 function applyCaptionToken(state: CaptionFold, token: TranscriptToken) {
@@ -147,6 +204,11 @@ function applyCaptionToken(state: CaptionFold, token: TranscriptToken) {
   if (!translated) {
     const previous = state.open;
     if (previous && (!sameTag(previous.speaker, token.speaker) || !sameLanguage(previous.language, token.language))) commitOpenTurn(state);
+    else if (previous) {
+      const action = breakBefore(state, previous, text);
+      if (action === 'now') commitOpenTurn(state);
+      else if (action) splitAtBoundary(state, action);
+    }
     state.open ??= blankTurn();
     const open = state.open;
     if (!open.language && token.language) open.language = token.language;
@@ -154,13 +216,18 @@ function applyCaptionToken(state: CaptionFold, token: TranscriptToken) {
     if (open.startMs === undefined && typeof token.start_ms === 'number') open.startMs = token.start_ms;
     if (typeof token.end_ms === 'number') open.endMs = token.end_ms;
     open.source += text;
-    if (!token.translation_status && (token.translation || token.translation_text)) open.translation += token.translation ?? token.translation_text ?? '';
+    const inline = !token.translation_status ? token.translation ?? token.translation_text ?? '' : '';
+    open.translation += inline;
+    markSourceEnd(state, open, typeof token.start_ms === 'number' ? token.start_ms : undefined, Boolean(inline));
     return;
   }
   state.open ??= blankTurn();
   const open = state.open;
   if (!open.language && token.source_language) open.language = token.source_language;
   open.translation += text;
+  const translation = open.translation.trim();
+  if (state.sentence && sentenceEnding.test(translation)) state.sentence.translated = true;
+  if (state.clause && clauseEnding.test(translation)) state.clause.translated = true;
 }
 
 export function ingestCaptionTokens(state: CaptionFold, tokens: TranscriptToken[]) {
@@ -174,6 +241,8 @@ function presentOpenTurn(turn: CaptionTurn, interim: boolean): CaptionTurn {
 export function projectCaptionTurns(state: CaptionFold, interimTokens: TranscriptToken[] = [], flush = false): CaptionTurn[] {
   const scratch = createCaptionFold();
   scratch.open = state.open ? { ...state.open } : null;
+  scratch.sentence = state.sentence ? { ...state.sentence } : null;
+  scratch.clause = state.clause ? { ...state.clause } : null;
   let sawInterim = false;
   for (const token of interimTokens) {
     applyCaptionToken(scratch, token);
@@ -209,6 +278,41 @@ export function pairTimedLines(sourcePieces: TimedPiece[], translationPieces: Ti
     });
   }
   return lines;
+}
+
+export const REFERRAL = {
+  inviteeSeconds: 2 * 60 * 60,
+  inviterSeconds: 5 * 60 * 60,
+  qualifySeconds: 3 * 60,
+  qualifyDays: 14,
+  pendingCap: 5,
+  monthlyQualifiedCap: 10,
+  monthlyWindowDays: 30,
+  lifetimeQualifiedCap: 30,
+  sameIpWindowDays: 7,
+  velocityWindowHours: 24,
+  velocityCap: 5,
+  domainBurstAt: 3,
+  registerIpPerHour: 8,
+  registerWindowHours: 1,
+  codeLength: 8,
+  codeAlphabet: 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
+} as const;
+
+export function normalizeInviteCode(value: string) {
+  const code = value.trim().toUpperCase();
+  if (code.length !== REFERRAL.codeLength) return null;
+  for (const char of code) if (!REFERRAL.codeAlphabet.includes(char)) return null;
+  return code;
+}
+
+export const PCM_BYTES_PER_SECOND = 32000;
+
+/* 16 kHz, 16-bit, mono. A frame that would exceed the reserved seconds is refused whole. */
+export function acceptPcmFrame(forwardedBytes: number, frameBytes: number, allowedSeconds: number) {
+  if (frameBytes <= 0) return true;
+  const budget = Math.max(0, allowedSeconds) * PCM_BYTES_PER_SECOND;
+  return frameBytes <= budget - Math.max(0, forwardedBytes);
 }
 
 export const PLANS: Record<Plan, { label: string; monthlySeconds: number | null; maxSessionSeconds: number }> = {

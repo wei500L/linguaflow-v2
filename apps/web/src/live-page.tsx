@@ -1,7 +1,6 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, type TranscriptToken } from '@linguaflow/shared';
 import { apiOrigin, openSocket } from './lib/api';
-import { READING_QUERY, useMediaQuery } from './lib/breakpoints';
 import { lockProgrammaticScroll, nudgeToBottom } from './lib/follow-scroll';
 import { tr, useLang } from './lib/i18n';
 import { forceDark } from './lib/theme';
@@ -32,23 +31,26 @@ function storedSize(): CaptionSize {
 
 export function LivePage({ token }: { token: string }) {
   useLang();
-  /* A projector is always the dark stage. A personal screen follows the reader's
-     own theme, since a student may be reading this in a bright hall. */
-  const reading = useMediaQuery(READING_QUERY);
+  /* A personal device, including a tablet in landscape, stays in reading mode.
+     The three-line stage is only for an explicit cast link or full screen. */
+  const cast = new URLSearchParams(window.location.search).get('cast') === '1';
+  const [fullscreen, setFullscreen] = useState(false);
+  const reading = !fullscreen && !cast;
+  const [savedOnStage, setSavedOnStage] = useState(false);
   useEffect(() => {
     forceDark(!reading);
     return () => forceDark(false);
   }, [reading]);
   const [meta, setMeta] = useState<LiveMeta | null>(null);
-  const [error, setError] = useState('');
+  const [fault, setFault] = useState<'' | 'offline' | 'expired'>('');
   const [reconnecting, setReconnecting] = useState(false);
   const [segments, setSegments] = useState<Array<{ source: string; translation: string; speaker?: string; language?: string; interim?: boolean }>>([]);
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({});
   const viewChosen = useRef(storedView() !== null);
   const [view, setView] = useState<CaptionView>(() => storedView() ?? 'translation');
   const [size, setSize] = useState<CaptionSize>(storedSize);
-  const [fullscreen, setFullscreen] = useState(false);
   const [controlsOpen, setControlsOpen] = useState(false);
+  const retryRef = useRef<(() => void) | null>(null);
   const [showJump, setShowJump] = useState(false);
   const pageRef = useRef<HTMLElement>(null);
   const stackRef = useRef<HTMLDivElement>(null);
@@ -88,10 +90,16 @@ export function LivePage({ token }: { token: string }) {
       dead = true;
       window.clearTimeout(timer);
       setReconnecting(false);
-      setError(tr('分享链接已失效。'));
+      setFault('expired');
       const current = socket;
       socket = null;
       current?.close();
+    };
+    const failOffline = () => {
+      if (!alive || dead) return;
+      window.clearTimeout(timer);
+      setReconnecting(false);
+      setFault('offline');
     };
     const retry = (delay: number) => {
       if (!alive || dead) return;
@@ -99,38 +107,55 @@ export function LivePage({ token }: { token: string }) {
       setReconnecting(true);
       timer = window.setTimeout(() => void load(), delay);
     };
+    const retryNow = () => {
+      if (!alive || dead) return;
+      failures = 0;
+      setFault('');
+      setReconnecting(true);
+      void load();
+    };
+    retryRef.current = retryNow;
 
     async function load() {
       let response: Response;
       try { response = await fetch(`${apiOrigin}/v1/live/${encodeURIComponent(token)}`); }
       catch {
-        if (!alive) return;
-        if (!seenMeta) { expire(); return; }
+        if (!alive || dead) return;
         failures += 1;
-        if (failures > 5) { expire(); return; }
+        if (failures > 5) { failOffline(); return; }
         retry(1000);
         return;
       }
       if (!alive || dead) return;
       if (!response.ok) {
-        if (!seenMeta) { expire(); return; }
+        if (response.status === 404) { expire(); return; }
         failures += 1;
-        if (failures > 5) { expire(); return; }
+        if (failures > 5) { failOffline(); return; }
         retry(1000);
         return;
       }
       const payload = await response.json() as LiveMeta;
+      failures = 0;
       if (payload.phase === 'ended' && !payload.empty) {
+        const projecting = Boolean(document.fullscreenElement) || new URLSearchParams(window.location.search).get('cast') === '1';
+        if (projecting) {
+          setSavedOnStage(true);
+          seenMeta = true;
+          setMeta(payload);
+          setFault('');
+          setReconnecting(false);
+          return;
+        }
         window.location.replace(`/s/${encodeURIComponent(token)}`);
         return;
       }
       seenMeta = true;
       setMeta(payload);
-      setError('');
-      if (payload.phase === 'waiting') {
-        setReconnecting(false);
+      setFault('');
+      setReconnecting(false);
+      if (payload.phase === 'waiting' || payload.phase === 'saving') {
         window.clearTimeout(timer);
-        timer = window.setTimeout(() => void load(), 2000);
+        timer = window.setTimeout(() => void load(), payload.phase === 'saving' ? 1000 : 2000);
       }
       if (payload.phase === 'live' && payload.websocketUrl && !socket) {
         window.clearTimeout(timer);
@@ -169,14 +194,18 @@ export function LivePage({ token }: { token: string }) {
           socket = null;
           if (!alive || ignoreClose || dead) return;
           failures += 1;
-          if (failures > 5) { expire(); return; }
+          if (failures > 5) { failOffline(); return; }
           retry(1000);
         };
       }
     }
     void load();
-    return () => { alive = false; window.clearTimeout(timer); socket?.close(); };
+    return () => { alive = false; retryRef.current = null; window.clearTimeout(timer); socket?.close(); };
   }, [token]);
+  useEffect(() => {
+    if (!savedOnStage || fullscreen || cast) return;
+    window.location.replace(`/s/${encodeURIComponent(token)}`);
+  }, [savedOnStage, fullscreen, cast, token]);
 
   useEffect(() => {
     if (meta?.phase !== 'live') return;
@@ -284,19 +313,31 @@ export function LivePage({ token }: { token: string }) {
   const visibleCaptions = segments.slice(hiddenCaptions, captionEnd);
   const title = meta?.title?.trim() || tr('这场翻译正在进行');
   const direction = meta ? `${meta.languageA.toUpperCase()} ${meta.mode === 'two_way' ? '↔' : '→'} ${meta.languageB.toUpperCase()}` : '';
-  const waitingCopy = meta?.mode === 'two_way' ? tr('等待讲者开始…') : tr('老师还没开始，留在这个页面');
+  const waitingCopy = meta?.mode === 'two_way' ? tr('等待讲者开始…') : tr('这场翻译还没开始，留在这个页面');
+  const keepCaptions = meta?.phase === 'ended' && Boolean(meta.empty) && segments.length > 0;
+  const stageHold = meta?.phase === 'saving'
+    ? tr('正在保存这场翻译…')
+    : meta?.phase === 'waiting'
+      ? waitingCopy
+      : reconnecting
+        ? tr('连接中断，正在恢复…')
+        : tr('正在聆听');
   return <main ref={pageRef} className={`projection-page caption-${size}${reading ? ' is-reading' : ''}${controlsOpen ? ' controls-open' : ''}`}>
     <div className="projection-edge">
       <span>{segments.length ? title : 'LinguaFlow'}</span>
       <span>{direction}</span>
     </div>
-    {reconnecting && segments.length > 0 && <p className="projection-status" role="status">{tr('连接中断，正在恢复…')}</p>}
-    {error && <p className="projection-error" role="alert">{error}</p>}
-    {!meta && !error && <div className="projection-wait" role="status"><i /><em>{tr('正在连接这场翻译…')}</em></div>}
-    {meta?.phase === 'ended' && meta.empty && <div className="projection-wait"><strong>{title}</strong><em>{tr('这场翻译已结束，还没有可看的字幕。')}</em></div>}
-    {meta && meta.phase !== 'ended' && <section className="projection-stage">
+    {meta?.phase === 'saving' && segments.length > 0 && <p className="projection-status" role="status">{tr('正在保存这场翻译…')}</p>}
+    {savedOnStage && <div className="projection-fault" role="status"><p className="projection-status">{fullscreen ? tr('这场翻译已保存。退出全屏后可以回看。') : tr('这场翻译已保存。')}</p>{!fullscreen && <button type="button" className="projection-retry" onClick={() => { window.location.assign(`/s/${encodeURIComponent(token)}`); }}>{tr('查看这场记录')}</button>}</div>}
+    {keepCaptions && <p className="projection-status" role="status">{tr('这场翻译已结束。这些字幕还留在这个页面上。')}</p>}
+    {reconnecting && segments.length > 0 && meta?.phase !== 'saving' && !keepCaptions && !fault && <p className="projection-status" role="status">{tr('连接中断，正在恢复…')}</p>}
+    {fault === 'expired' && <p className="projection-error" role="alert">{tr('分享链接已失效。')}</p>}
+    {fault === 'offline' && <div className="projection-fault" role="alert"><p className="projection-error">{segments.length ? tr('网络中断了，字幕还留在这个页面上。') : tr('连不上这场翻译。请检查网络后再试。')}</p><button type="button" className="projection-retry" onClick={() => retryRef.current?.()}>{tr('重试')}</button></div>}
+    {!meta && !fault && <div className="projection-wait" role="status"><i /><em>{tr('正在连接这场翻译…')}</em></div>}
+    {meta?.phase === 'ended' && meta.empty && segments.length === 0 && <div className="projection-wait"><strong>{title}</strong><em>{tr('这场翻译已结束，还没有可看的字幕。')}</em></div>}
+    {meta && (meta.phase !== 'ended' || segments.length > 0) && <section className="projection-stage">
       <div className="projection-stack" ref={stackRef} onScroll={onStackScroll}>
-        {segments.length === 0 && <div className="projection-wait" role="status"><strong>{title}</strong><span>{direction}</span><em>{reconnecting ? tr('连接中断，正在恢复…') : meta.phase === 'waiting' ? waitingCopy : tr('正在聆听')}</em></div>}
+        {segments.length === 0 && <div className="projection-wait" role="status"><strong>{title}</strong><span>{direction}</span><em>{stageHold}</em></div>}
         {reading && segments.length > 0 && <div className="projection-spacer" />}
         {reading && hiddenCaptions > 0 && <button type="button" className="earlier-captions" onClick={showEarlierCaptions}>{tr('更早的字幕')}</button>}
         {visibleCaptions.map((segment, index) => {

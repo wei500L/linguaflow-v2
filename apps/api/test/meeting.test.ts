@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createCaptionFold, extractActionItems, foldCaptionTurns, ingestCaptionTokens, projectCaptionTurns, splitQuotaCharge, summaryChargeSeconds, type TranscriptToken } from '../../../packages/shared/src/index.ts';
-import { audienceIsOpen } from '../src/lib/audience.ts';
+import { createCaptionFold, extractActionItems, FORCE_TURN_CHARS, HARD_TURN_CHARS, foldCaptionTurns, ingestCaptionTokens, projectCaptionTurns, splitQuotaCharge, summaryChargeSeconds, type TranscriptToken } from '../../../packages/shared/src/index.ts';
+import { audienceIsOpen, audienceReveal, audienceViewPhase } from '../src/lib/audience.ts';
 import { classifyGlossaryImport } from '../src/lib/glossary-import.ts';
 import { buildMeetingMarkdown, formatClock } from '../src/export/meeting.ts';
 import { signAudioPlayback, verifyAudioPlayback } from '../src/lib/playback.ts';
@@ -82,6 +82,218 @@ test('incremental caption folding matches folding the whole token list', () => {
     assert.deepEqual(projectCaptionTurns(fold, interim), foldCaptionTurns(finals, interim));
   }
   assert.deepEqual(projectCaptionTurns(fold, [], true), foldCaptionTurns(finals, [], true));
+});
+
+const ruSentence = (index: number): TranscriptToken => ({ text: ` ${String(index).padStart(2, '0')}${'а'.repeat(97)}.`, translation_status: 'original', language: 'ru', speaker: '1' });
+const zhSentence = (index: number): TranscriptToken => ({ text: `句子${index}。`, translation_status: 'translation', language: 'zh', source_language: 'ru' });
+
+test('long monologue splits at sentence boundaries once the translation catches up', () => {
+  const tokens: TranscriptToken[] = [];
+  for (let index = 1; index <= 6; index += 1) tokens.push(ruSentence(index), zhSentence(index));
+  const turns = foldCaptionTurns(tokens, [], true);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]?.source, [1, 2, 3].map((index) => ruSentence(index).text.trim()).join(' '));
+  assert.equal(turns[0]?.translation, '句子1。句子2。句子3。');
+  assert.equal(turns[1]?.source.startsWith('04'), true);
+  assert.equal(turns[1]?.translation, '句子4。句子5。句子6。');
+});
+
+test('long turn waits while the translation lags behind the source', () => {
+  const turns = foldCaptionTurns([
+    ruSentence(1), zhSentence(1), ruSentence(2), zhSentence(2), ruSentence(3),
+    ruSentence(4), zhSentence(3), zhSentence(4), ruSentence(5)
+  ], [], true);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]?.translation, '句子1。句子2。句子3。句子4。');
+  assert.equal(turns[0]?.source.endsWith(ruSentence(4).text.trim()), true);
+  assert.equal(turns[1]?.source, ruSentence(5).text.trim());
+});
+
+test('late translation tail moves the next sentence opening into the new turn', () => {
+  const timed = (token: TranscriptToken, start: number): TranscriptToken => ({ ...token, start_ms: start, end_ms: start + 900 });
+  const turns = foldCaptionTurns([
+    timed(ruSentence(1), 0), zhSentence(1), timed(ruSentence(2), 1000), zhSentence(2), timed(ruSentence(3), 2000), { ...zhSentence(3), text: '句子' },
+    { text: ' Дальше', translation_status: 'original', language: 'ru', speaker: '1', start_ms: 3000, end_ms: 3300 },
+    { text: '3。', translation_status: 'translation', language: 'zh', source_language: 'ru' },
+    { text: ' значит.', translation_status: 'original', language: 'ru', speaker: '1', start_ms: 3400, end_ms: 3800 },
+    zhSentence(4)
+  ], [], true);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]?.translation, '句子1。句子2。句子3。');
+  assert.equal(turns[0]?.source.endsWith('.'), true);
+  assert.equal(turns[0]?.endMs, 2900);
+  assert.equal(turns[1]?.source, 'Дальше значит.');
+  assert.equal(turns[1]?.translation, '句子4。');
+  assert.equal(turns[1]?.startMs, 3000);
+  assert.equal(turns[1]?.endMs, 3800);
+});
+
+test('long turn still splits when the translation merges sentences', () => {
+  const turns = foldCaptionTurns([
+    ruSentence(1), ruSentence(2), { ...zhSentence(1), text: '句子1和2。' }, ruSentence(3), zhSentence(3), ruSentence(4), zhSentence(4)
+  ], [], true);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]?.translation, '句子1和2。句子3。');
+  assert.equal(turns[1]?.translation, '句子4。');
+});
+
+const ruClause = (index: number, end: string): TranscriptToken => ({ text: ` ${index}${'б'.repeat(118)}${end}`, translation_status: 'original', language: 'ru', speaker: '1' });
+const zhClause = (index: number, end: string): TranscriptToken => ({ text: `分句${index}${end}`, translation_status: 'translation', language: 'zh', source_language: 'ru' });
+
+test('a translated comma does not split a turn below the clause limit', () => {
+  const turns = foldCaptionTurns([
+    ruClause(1, ','), zhClause(1, '，'), ruClause(2, ','), zhClause(2, '，'), ruClause(3, '.')
+  ], [], true);
+  assert.equal(turns.length, 1);
+});
+
+test('a very long sentence splits at the latest translated comma', () => {
+  const turns = foldCaptionTurns([
+    ruClause(1, ','), zhClause(1, '，'), ruClause(2, ','), zhClause(2, '，'), ruClause(3, ','), zhClause(3, '，'), ruClause(4, '.'), zhClause(4, '。')
+  ], [], true);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]?.source.endsWith(','), true);
+  assert.equal(turns[0]?.translation, '分句1，分句2，分句3，');
+  assert.equal(turns[1]?.source.startsWith('4'), true);
+  assert.equal(turns[1]?.translation, '分句4。');
+});
+
+test('an already translated clause is never pushed into the next turn', () => {
+  const turns = foldCaptionTurns([
+    ruSentence(1), zhSentence(1), ruSentence(2), zhSentence(2), ruSentence(3), ruClause(4, ','), zhSentence(3), zhClause(4, '，'), ruClause(5, ','), zhClause(5, '，'), ruClause(6, '.'), zhClause(6, '。')
+  ], [], true);
+  for (const turn of turns) assert.deepEqual(clauseIds(turn.translation, /(?:句子|分句)(\d+)/g), clauseIds(turn.source, /(?:^| )0?(\d)/g));
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]?.translation, '句子1。句子2。句子3。分句4，');
+});
+
+test('hard turn limit splits even without a translation', () => {
+  const tokens = Array.from({ length: 9 }, (_, index) => ruSentence(index + 1));
+  const turns = foldCaptionTurns(tokens, [], true);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]?.source.length >= HARD_TURN_CHARS, true);
+  assert.equal(turns[1]?.source, ruSentence(9).text.trim());
+});
+
+test('chinese turns close at shorter lengths than russian ones', () => {
+  const zhSource = (index: number): TranscriptToken => ({ text: `第${index}句${'中'.repeat(27)}。`, translation_status: 'original', language: 'zh', speaker: '1' });
+  const enSentence = (index: number): TranscriptToken => ({ text: ` Sentence ${index}.`, translation_status: 'translation', language: 'en', source_language: 'zh' });
+  const tokens: TranscriptToken[] = [];
+  for (let index = 1; index <= 4; index += 1) tokens.push(zhSource(index), enSentence(index));
+  const turns = foldCaptionTurns(tokens, [], true);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]?.translation, 'Sentence 1. Sentence 2. Sentence 3.');
+  assert.equal(turns[1]?.translation, 'Sentence 4.');
+});
+
+test('unpunctuated speech is force split at a word boundary', () => {
+  const tokens: TranscriptToken[] = [];
+  for (let index = 0; index < 250; index += 1) tokens.push({ text: ' сло', translation_status: 'original', language: 'ru', speaker: '1' }, { text: 'во', translation_status: 'original', language: 'ru', speaker: '1' });
+  const turns = foldCaptionTurns(tokens, [], true);
+  assert.equal(turns.length, 2);
+  assert.equal(turns[0]?.source.length >= FORCE_TURN_CHARS, true);
+  assert.equal(turns[0]?.source.endsWith('слово'), true);
+  assert.equal(turns[1]?.source.startsWith('слово'), true);
+  assert.equal(`${turns[0]?.source} ${turns[1]?.source}`.split(' ').length, 250);
+});
+
+test('incremental folding matches whole-list folding for long turns', () => {
+  const stream: TranscriptToken[] = [];
+  for (let index = 1; index <= 7; index += 1) stream.push({ ...ruSentence(index), is_final: true }, { ...zhSentence(index), is_final: index % 2 === 0 });
+  const fold = createCaptionFold();
+  const finals: TranscriptToken[] = [];
+  for (let start = 0; start < stream.length; start += 3) {
+    const batch = stream.slice(start, start + 3);
+    const incoming = batch.filter((token) => token.is_final);
+    const interim = batch.filter((token) => !token.is_final);
+    ingestCaptionTokens(fold, incoming);
+    finals.push(...incoming);
+    assert.deepEqual(projectCaptionTurns(fold, interim), foldCaptionTurns(finals, interim));
+  }
+  assert.deepEqual(projectCaptionTurns(fold, [], true), foldCaptionTurns(finals, [], true));
+});
+
+function lectureStream(seed: number, sentences: number) {
+  let state = seed;
+  const random = () => { state = (state * 1103515245 + 12345) % 2147483648; return state / 2147483648; };
+  const words = ['закон', 'безопасность', 'гражданской', 'обороне', 'то', 'есть', 'да', 'вот', 'субъектов', 'федерации', 'система', 'власти'];
+  const tokens: TranscriptToken[] = [];
+  let carry: TranscriptToken[] = [];
+  let clauseId = 0;
+  let ms = 0;
+  for (let sentence = 0; sentence < sentences; sentence += 1) {
+    const clauses = 1 + Math.floor(random() * 3);
+    for (let part = 0; part < clauses; part += 1) {
+      clauseId += 1;
+      const last = part === clauses - 1;
+      const source: TranscriptToken[] = [{ text: ` c${clauseId}`, translation_status: 'original', language: 'ru', speaker: '1' }];
+      const count = 4 + Math.floor(random() * 10);
+      for (let index = 0; index < count; index += 1) {
+        const word = words[Math.floor(random() * words.length)]!;
+        const cut = Math.max(1, Math.floor(word.length / 2));
+        source.push({ text: ` ${word.slice(0, cut)}`, translation_status: 'original', language: 'ru', speaker: '1' }, { text: word.slice(cut), translation_status: 'original', language: 'ru', speaker: '1' });
+      }
+      source.push({ text: last ? (random() < 0.2 ? '?' : '.') : ',', translation_status: 'original', language: 'ru', speaker: '1' });
+      for (const token of source) { token.start_ms = ms; token.end_ms = ms + 120; ms += 150; }
+      const translation = `译${clauseId}${'内容'.repeat(1 + Math.floor(random() * 4))}${last ? '。' : '，'}`;
+      const pieces: TranscriptToken[] = [];
+      for (let index = 0; index < translation.length; index += 2) pieces.push({ text: translation.slice(index, index + 2), translation_status: 'translation', language: 'zh', source_language: 'ru' });
+      // The tail of the previous translation chunk sometimes finalizes after the first word of the next source chunk.
+      tokens.push(source[0]!, ...carry, ...source.slice(1));
+      const split = random() < 0.3 ? 1 : pieces.length;
+      tokens.push(...pieces.slice(0, split));
+      carry = pieces.slice(split);
+    }
+  }
+  tokens.push(...carry);
+  return tokens;
+}
+
+function clauseIds(text: string, pattern: RegExp) {
+  return [...text.matchAll(pattern)].map((match) => Number(match[1]));
+}
+
+test('simulated lecture keeps every translation with its own source clauses', () => {
+  for (const seed of [1, 7, 42, 2026]) {
+    const stream = lectureStream(seed, 60);
+    const turns = foldCaptionTurns(stream, [], true);
+    assert.equal(turns.length > 5, true, `seed ${seed} produced ${turns.length} turns`);
+    const clauseStart = new Map<number, number>();
+    const clauseEnd = new Map<number, number>();
+    let current = 0;
+    for (const token of stream) {
+      if (token.translation_status === 'translation') continue;
+      const id = /^ c(\d+)$/.exec(token.text)?.[1];
+      if (id) { current = Number(id); clauseStart.set(current, token.start_ms!); }
+      clauseEnd.set(current, token.end_ms!);
+    }
+    const allSource: number[] = [];
+    const allTranslation: number[] = [];
+    for (const turn of turns) {
+      assert.equal(turn.source.length < HARD_TURN_CHARS, true, `seed ${seed} turn of ${turn.source.length} chars`);
+      const ids = clauseIds(turn.source, /\bc(\d+)\b/g);
+      assert.equal(turn.startMs, clauseStart.get(ids[0]!), `seed ${seed} start of turn ${ids[0]}`);
+      assert.equal(turn.endMs, clauseEnd.get(ids[ids.length - 1]!), `seed ${seed} end of turn ${ids[0]}`);
+      assert.deepEqual(clauseIds(turn.translation, /译(\d+)/g), clauseIds(turn.source, /\bc(\d+)\b/g), `seed ${seed} misaligned turn`);
+      allSource.push(...clauseIds(turn.source, /\bc(\d+)\b/g));
+      allTranslation.push(...clauseIds(turn.translation, /译(\d+)/g));
+    }
+    assert.deepEqual(allSource, allTranslation);
+    const fold = createCaptionFold();
+    const finals: TranscriptToken[] = [];
+    let position = 0;
+    let step = seed;
+    while (position < stream.length) {
+      step = (step * 31 + 7) % 97;
+      const size = 1 + (step % 9);
+      const incoming = stream.slice(position, position + size).map((token) => ({ ...token, is_final: true }));
+      const interim = stream.slice(position + size, position + size + (step % 5)).map((token) => ({ ...token, is_final: false }));
+      ingestCaptionTokens(fold, incoming);
+      finals.push(...incoming);
+      position += size;
+      assert.deepEqual(projectCaptionTurns(fold, interim), foldCaptionTurns(finals, interim));
+    }
+  }
 });
 
 test('meeting markdown includes a missing summary and timed lines', () => {
@@ -179,7 +391,8 @@ test('long records are chunked and then merged', async () => {
 });
 
 test('one-way soniox config hints only the spoken language', () => {
-  const config = buildSonioxConfig('test-key', { id: 'session-1', mode: 'one_way', languageA: 'zh', languageB: null, targetLanguage: 'en' }, []);
+  const config = buildSonioxConfig({ id: 'session-1', mode: 'one_way', languageA: 'zh', languageB: null, targetLanguage: 'en' }, []);
+  assert.equal(Object.hasOwn(config, 'api_key'), false);
   assert.deepEqual(config.language_hints, ['zh']);
   assert.equal(config.language_hints_strict, true);
   assert.deepEqual(config.translation, { type: 'one_way', target_language: 'en' });
@@ -192,7 +405,7 @@ test('one-way soniox config hints only the spoken language', () => {
 });
 
 test('two-way soniox config hints both spoken languages without strict mode', () => {
-  const config = buildSonioxConfig('test-key', { id: 'session-2', mode: 'two_way', languageA: 'RU', languageB: 'zh-CN', targetLanguage: null }, [
+  const config = buildSonioxConfig({ id: 'session-2', mode: 'two_way', languageA: 'RU', languageB: 'zh-CN', targetLanguage: null }, [
     { source: '  МГУ  ', target: '莫斯科大学' },
     { source: 'МГУ', target: '另一译法' },
     { source: ' ', target: '空白' }
@@ -206,7 +419,7 @@ test('two-way soniox config hints both spoken languages without strict mode', ()
 
 test('soniox context drops terms that would exceed the character budget', () => {
   const terms = Array.from({ length: 40 }, (_, index) => ({ source: `term-${index}-${'x'.repeat(400)}`, target: `译-${index}-${'y'.repeat(400)}` }));
-  const config = buildSonioxConfig('test-key', { id: 'session-3', mode: 'one_way', languageA: 'en', languageB: null, targetLanguage: 'es' }, terms);
+  const config = buildSonioxConfig({ id: 'session-3', mode: 'one_way', languageA: 'en', languageB: null, targetLanguage: 'es' }, terms);
   assert.ok((config.context.terms?.length ?? 0) > 0);
   assert.ok((config.context.terms?.length ?? 0) < terms.length);
   assert.equal(JSON.stringify(config.context).length <= 8000, true);
@@ -347,14 +560,27 @@ test('share links close after revocation or expiry', () => {
   assert.equal(shareIsActive({ revokedAt: null, expiresAt: new Date('2026-09-27T12:00:00.000Z') }, now), true);
 });
 
+test('audience page waits out the save gap before saying nothing was saved', () => {
+  assert.equal(audienceViewPhase({ ended: false, room: 'live' }), 'live');
+  assert.equal(audienceViewPhase({ ended: false, room: 'saving' }), 'saving');
+  assert.equal(audienceViewPhase({ ended: true, room: 'saving' }), 'saving');
+  assert.equal(audienceViewPhase({ ended: true, room: 'live' }), 'saving');
+  assert.equal(audienceViewPhase({ ended: false, room: null }), 'waiting');
+  assert.equal(audienceViewPhase({ ended: true, room: null }), 'ended');
+});
+
 test('audience links close after revocation or expiry', () => {
   const now = new Date('2026-09-26T12:00:00.000Z');
   const open = { audienceToken: 'token', audienceTokenHash: 'hash', audienceIncludeAudio: false, audienceRevokedAt: null, audienceExpiresAt: null };
   assert.equal(audienceIsOpen(open, now), true);
-  assert.equal(audienceIsOpen({ ...open, audienceToken: null }, now), false);
+  assert.equal(audienceIsOpen({ ...open, audienceToken: null }, now), true);
+  assert.equal(audienceIsOpen({ ...open, audienceTokenHash: null }, now), false);
   assert.equal(audienceIsOpen({ ...open, audienceRevokedAt: now }, now), false);
   assert.equal(audienceIsOpen({ ...open, audienceExpiresAt: now }, now), false);
   assert.equal(audienceIsOpen({ ...open, audienceExpiresAt: new Date('2026-09-27T12:00:00.000Z') }, now), true);
+  assert.equal(audienceReveal(open)?.token, 'token');
+  assert.equal(audienceReveal({ ...open, audienceToken: null })?.token, null);
+  assert.equal(audienceReveal({ ...open, audienceRevokedAt: now }), null);
 });
 
 test('glossary import explains duplicates, bad lines, and the 200 term cap', () => {

@@ -9,9 +9,6 @@ export const PHONE_QUERY = '(max-width: 639.98px)';
 /** Below the desktop breakpoint, covering phones and small tablets. */
 export const COMPACT_QUERY = '(max-width: 1023.98px)';
 
-/** A personal screen rather than a projector, which is what /live switches on. */
-export const READING_QUERY = '(max-width: 1099px)';
-
 export function useMediaQuery(query: string) {
   const [matches, setMatches] = useState(() => typeof window !== 'undefined' && window.matchMedia(query).matches);
   useEffect(() => {

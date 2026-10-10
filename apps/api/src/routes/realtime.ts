@@ -1,15 +1,15 @@
 import crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { and, eq, isNull } from 'drizzle-orm';
+import { and, desc, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index.js';
-import { entitlements, glossaries, glossaryTerms, realtimeSessions } from '../db/schema.js';
-import { ensureEntitlement, remainingSeconds } from '../lib/quota.js';
+import { entitlements, glossaries, glossaryTerms, realtimeSessions, transcripts } from '../db/schema.js';
+import { assertFreeTranslation, deviceDenied, recordUserDevice } from '../lib/device-store.js';
+import { holdFreeDevice, remainingSeconds, settleUsage } from '../lib/quota.js';
 import { PLANS } from '@linguaflow/shared';
-import { audienceIsOpen, newAudienceToken, revokeAudienceShare } from '../lib/audience.js';
+import { audienceReveal, newAudienceToken, revokeAudienceShare } from '../lib/audience.js';
 import { audienceCount, closeActiveSession, dropAudience, handleRealtimeSocket, holdSession } from '../realtime/proxy.js';
 import { glossaryInjection, sameLanguageResponse, type GlossaryMeta, type SonioxSessionInput } from '../realtime/soniox.js';
-import { settleUsage } from '../lib/quota.js';
 import { socketUrl } from '../lib/socket-url.js';
 
 export const quotaExhaustedMessage = '额度已用完，无法开始新的翻译。';
@@ -38,18 +38,24 @@ export async function realtimeRoutes(app: FastifyInstance) {
       glossaryMeta = glossary;
     }
     const sessionToken = crypto.randomBytes(32).toString('base64url');
-    await ensureEntitlement(userId);
+    const device = await recordUserDevice(userId, request);
+    await assertFreeTranslation(userId, device);
     const session = await db.transaction(async (tx) => {
       const [entitlement] = await tx.select().from(entitlements).where(eq(entitlements.userId, userId)).for('update');
       const maxSeconds = PLANS[entitlement.plan as keyof typeof PLANS].maxSessionSeconds;
       const available = remainingSeconds(entitlement) + entitlement.addonSeconds;
       if (available <= 0) throw Object.assign(new Error('quota_exhausted'), { statusCode: 402, code: 'quota_exhausted' });
+      if (entitlement.plan === 'free') {
+        if (!device) throw deviceDenied('device_required');
+        if (remainingSeconds(entitlement) > 0) await holdFreeDevice(tx, userId, device.fingerprintHash, device.deviceId, device.strong !== false);
+      }
       const [active] = await tx.select().from(realtimeSessions).where(and(eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt))).for('update');
       if (active) throw Object.assign(new Error('session_conflict'), { statusCode: 409, code: 'session_conflict', sessionId: active.id });
-      const [created] = await tx.insert(realtimeSessions).values({ userId, sessionTokenHash: crypto.createHash('sha256').update(sessionToken).digest('hex'), mode: body.type, languageA: body.languageA, languageB: body.type === 'two_way' ? body.languageB : null, targetLanguage: body.type === 'one_way' ? body.targetLanguage : null, glossaryId: body.glossaryId, maxSessionSeconds: maxSeconds, reservedSeconds: Math.min(maxSeconds, available), recordAudio: body.recordAudio ?? true, title: body.title ?? null }).returning();
+      const [created] = await tx.insert(realtimeSessions).values({ userId, sessionTokenHash: crypto.createHash('sha256').update(sessionToken).digest('hex'), mode: body.type, languageA: body.languageA, languageB: body.type === 'two_way' ? body.languageB : null, targetLanguage: body.type === 'one_way' ? body.targetLanguage : null, glossaryId: body.glossaryId, maxSessionSeconds: maxSeconds, reservedSeconds: Math.min(maxSeconds, available), recordAudio: body.recordAudio ?? true, title: body.title ?? null, fingerprintHash: device?.fingerprintHash ?? null, deviceId: device?.deviceId ?? null }).returning();
       return created;
     }).catch(async (error: any) => {
       if (error?.code === 'quota_exhausted') return reply.code(402).send({ code: 'quota_exhausted', message: quotaExhaustedMessage });
+      if (error?.code === 'free_device_blocked' || error?.code === 'device_required') throw error;
       if (error?.code === 'session_conflict' || error?.code === '23505') {
         const [active] = error?.sessionId ? [{ id: error.sessionId }] : await db.select({ id: realtimeSessions.id }).from(realtimeSessions).where(and(eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt))).limit(1);
         return reply.code(409).send({ code: 'session_conflict', message: sessionConflictMessage, sessionId: active?.id ?? null });
@@ -65,6 +71,37 @@ export async function realtimeRoutes(app: FastifyInstance) {
     const userId = (request.user as { sub: string }).sub;
     const [session] = await db.select({ id: realtimeSessions.id, mode: realtimeSessions.mode, status: realtimeSessions.status, startedAt: realtimeSessions.startedAt, title: realtimeSessions.title, languageA: realtimeSessions.languageA, languageB: realtimeSessions.languageB, targetLanguage: realtimeSessions.targetLanguage }).from(realtimeSessions).where(and(eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt))).limit(1);
     return { session: session ?? null };
+  });
+
+  app.get('/v1/realtime/sessions/:id', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const parsed = z.string().uuid().safeParse((request.params as { id: string }).id);
+    if (!parsed.success) return reply.code(404).send({ message: '找不到这场翻译。' });
+    const [session] = await db.select({
+      id: realtimeSessions.id,
+      mode: realtimeSessions.mode,
+      status: realtimeSessions.status,
+      title: realtimeSessions.title,
+      languageA: realtimeSessions.languageA,
+      languageB: realtimeSessions.languageB,
+      targetLanguage: realtimeSessions.targetLanguage,
+      endedAt: realtimeSessions.endedAt,
+      transcriptId: transcripts.id
+    }).from(realtimeSessions).leftJoin(transcripts, eq(transcripts.sessionId, realtimeSessions.id)).where(and(eq(realtimeSessions.id, parsed.data), eq(realtimeSessions.userId, userId))).orderBy(desc(transcripts.createdAt)).limit(1);
+    if (!session) return reply.code(404).send({ message: '找不到这场翻译。' });
+    return {
+      session: {
+        id: session.id,
+        mode: session.mode,
+        status: session.status,
+        title: session.title,
+        languageA: session.languageA,
+        languageB: session.languageB,
+        targetLanguage: session.targetLanguage,
+        endedAt: session.endedAt ? session.endedAt.toISOString() : null,
+        transcriptId: session.transcriptId
+      }
+    };
   });
 
   app.post('/v1/realtime/sessions/:id/reconnect', { preHandler: app.authenticate }, async (request, reply) => {
@@ -83,26 +120,29 @@ export async function realtimeRoutes(app: FastifyInstance) {
     const { id } = request.params as { id: string };
     const [session] = await db.select().from(realtimeSessions).where(and(eq(realtimeSessions.id, id), eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt)));
     if (!session) return reply.code(404).send({ message: '这场翻译已经结束。' });
-    if (!audienceIsOpen(session) || !session.audienceToken) return { audience: null, viewerCount: audienceCount(id) };
-    return { audience: { token: session.audienceToken, includeAudio: session.audienceIncludeAudio, expiresAt: session.audienceExpiresAt }, viewerCount: audienceCount(id) };
+    return { audience: audienceReveal(session), viewerCount: audienceCount(id) };
   });
 
   app.post('/v1/realtime/sessions/:id/audience', { preHandler: app.authenticate }, async (request, reply) => {
     const userId = (request.user as { sub: string }).sub;
     const { id } = request.params as { id: string };
-    const body = z.object({ includeAudio: z.boolean().default(false), expiresInHours: z.number().int().min(1).max(24 * 30).nullable().optional() }).parse(request.body ?? {});
+    const body = z.object({ includeAudio: z.boolean().default(false), expiresInHours: z.number().int().min(1).max(24 * 30).nullable().optional(), reissue: z.boolean().optional() }).parse(request.body ?? {});
     const [session] = await db.select().from(realtimeSessions).where(and(eq(realtimeSessions.id, id), eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt)));
     if (!session) return reply.code(404).send({ message: '这场翻译已经结束。' });
-    const expiresAt = body.expiresInHours === null ? null : new Date(Date.now() + (body.expiresInHours ?? 24 * 7) * 60 * 60 * 1000);
-    const minted = session.audienceToken && session.audienceTokenHash && !session.audienceRevokedAt ? { token: session.audienceToken, tokenHash: session.audienceTokenHash } : newAudienceToken();
+    const hours = body.expiresInHours && body.expiresInHours > 0 ? body.expiresInHours : 24 * 30;
+    const expiresAt = new Date(Date.now() + hours * 60 * 60 * 1000);
+    const keep = Boolean(session.audienceTokenHash) && !session.audienceRevokedAt && !body.reissue;
+    const minted = keep ? null : newAudienceToken();
+    const token = minted?.token ?? session.audienceToken;
     const [updated] = await db.update(realtimeSessions).set({
-      audienceToken: minted.token,
-      audienceTokenHash: minted.tokenHash,
+      audienceToken: token,
+      audienceTokenHash: minted?.tokenHash ?? session.audienceTokenHash,
       audienceIncludeAudio: body.includeAudio,
       audienceExpiresAt: expiresAt,
       audienceRevokedAt: null
     }).where(eq(realtimeSessions.id, id)).returning({ token: realtimeSessions.audienceToken, includeAudio: realtimeSessions.audienceIncludeAudio, expiresAt: realtimeSessions.audienceExpiresAt });
-    return reply.code(201).send({ audience: updated });
+    if (minted) dropAudience(id);
+    return reply.code(201).send({ audience: { token: updated.token, includeAudio: updated.includeAudio, expiresAt: updated.expiresAt } });
   });
 
   app.delete('/v1/realtime/sessions/:id/audience', { preHandler: app.authenticate }, async (request, reply) => {

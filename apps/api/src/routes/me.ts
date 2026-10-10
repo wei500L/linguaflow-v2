@@ -3,10 +3,12 @@ import { and, desc, eq } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index.js';
 import { glossaries, glossaryTerms, summaryProviders, transcriptSegments, transcripts, usageLedger, users } from '../db/schema.js';
+import { accessClaims } from '../auth/access.js';
 import { changePassword, findUser, sendCode, verifyCode } from '../auth/service.js';
 import { deleteAccount } from '../lib/account.js';
 import { config } from '../config.js';
 import { ensureEntitlement, publicEntitlement } from '../lib/quota.js';
+import { presentReferral } from '../lib/referral.js';
 import { decryptSecret, encryptSecret, keyHint } from '../lib/secrets.js';
 import { assertSummaryEndpoint, endpointAllowsMissingKey } from '../lib/ssrf.js';
 import { findGlossaryPreset, GLOSSARY_PRESET_KEYS, GLOSSARY_PRESETS } from '../lib/glossary-presets.js';
@@ -71,8 +73,9 @@ export async function meRoutes(app: FastifyInstance) {
     const userId = (request.user as { sub: string }).sub;
     const body = z.object({ currentPassword: z.string().min(1).max(200), newPassword: z.string().min(8).max(200) }).parse(request.body);
     if (body.currentPassword === body.newPassword) return reply.code(400).send({ message: '新密码需要和当前密码不同。' });
-    if (!await changePassword(userId, body.currentPassword, body.newPassword)) return reply.code(401).send({ message: '当前密码不正确。' });
-    return { updated: true };
+    const updated = await changePassword(userId, body.currentPassword, body.newPassword);
+    if (!updated) return reply.code(401).send({ message: '当前密码不正确。' });
+    return { updated: true, token: app.jwt.sign(accessClaims(updated), { expiresIn: '24h' }) };
   });
 
   app.get('/v1/me/profile', { preHandler: app.authenticate }, async (request) => {
@@ -84,6 +87,11 @@ export async function meRoutes(app: FastifyInstance) {
   app.get('/v1/me/entitlement', { preHandler: app.authenticate }, async (request) => {
     const userId = (request.user as { sub: string }).sub;
     return publicEntitlement(await ensureEntitlement(userId));
+  });
+
+  app.get('/v1/me/referral', { preHandler: app.authenticate }, async (request) => {
+    const userId = (request.user as { sub: string }).sub;
+    return presentReferral(userId);
   });
 
   app.get('/v1/me/languages', { preHandler: app.authenticate }, async () => LANGUAGE_OPTIONS);

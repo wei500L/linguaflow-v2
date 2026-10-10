@@ -1,3 +1,5 @@
+import { deviceHeaderValue } from './device';
+
 const API_URL = import.meta.env.VITE_API_URL ?? (import.meta.env.DEV ? 'http://localhost:3000' : '');
 export const apiOrigin = API_URL;
 
@@ -60,7 +62,11 @@ function requestHeaders(init: RequestInit) {
 }
 
 export async function apiResponse(path: string, init: RequestInit = {}): Promise<Response> {
-  const response = await fetch(`${API_URL}${path}`, { ...init, headers: requestHeaders(init) });
+  const headers = requestHeaders(init);
+  if (!headers.has('x-linguaflow-device')) {
+    try { headers.set('x-linguaflow-device', await deviceHeaderValue()); } catch { /* free sessions reject a missing fingerprint */ }
+  }
+  const response = await fetch(`${API_URL}${path}`, { ...init, headers });
   if (response.status === 401 && !path.startsWith('/v1/auth/')) { clearToken(); window.dispatchEvent(new Event('linguaflow:auth-expired')); }
   if (!response.ok) {
     const payload = await response.json().catch(() => null);

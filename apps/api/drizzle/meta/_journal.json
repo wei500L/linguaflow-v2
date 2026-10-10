@@ -64,6 +64,27 @@
       "when": 1790455000000,
       "tag": "0008_library_glossary_share",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1791500000000,
+      "tag": "0009_free_device_control",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1791600000000,
+      "tag": "0010_referral_quota",
+      "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1791700000000,
+      "tag": "0011_audit_controls",
+      "breakpoints": true
     }
   ]
 }

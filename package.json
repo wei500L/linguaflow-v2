@@ -8,7 +8,7 @@
     "typecheck": "pnpm -r typecheck",
     "db:generate": "pnpm --filter @linguaflow/api db:generate",
     "db:migrate": "pnpm --filter @linguaflow/api db:migrate",
-    "test": "pnpm --filter @linguaflow/api test"
+    "test": "pnpm --filter @linguaflow/api test && pnpm --filter @linguaflow/web test"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

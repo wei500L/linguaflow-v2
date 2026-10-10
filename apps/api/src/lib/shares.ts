@@ -2,6 +2,14 @@ import crypto from 'node:crypto';
 import { and, eq, isNull, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { transcriptShares } from '../db/schema.js';
+export { sharePasswordMatches } from './share-password.js';
+
+export const SHARE_DEFAULT_MS = 30 * 24 * 60 * 60 * 1000;
+
+export function resolveShareExpiry(hours: number | null | undefined, now = Date.now()) {
+  if (hours && hours > 0) return new Date(now + hours * 60 * 60 * 1000);
+  return new Date(now + SHARE_DEFAULT_MS);
+}
 
 export const hashShareToken = (token: string) => crypto.createHash('sha256').update(token).digest('hex');
 const hashToken = hashShareToken;
@@ -18,7 +26,7 @@ export async function createShare(transcriptId: string, includeAudio: boolean, e
   const [share] = await db.insert(transcriptShares).values({
     transcriptId,
     tokenHash: hashToken(token),
-    token,
+    token: null,
     includeAudio: scope === 'summary' ? false : includeAudio,
     expiresAt,
     passwordHash: options?.passwordHash ?? null,
@@ -27,7 +35,7 @@ export async function createShare(transcriptId: string, includeAudio: boolean, e
   return presentShare(share, token);
 }
 
-function presentShare(share: typeof transcriptShares.$inferSelect, token: string | null = share.token) {
+function presentShare(share: typeof transcriptShares.$inferSelect, token: string | null = null) {
   return { id: share.id, token, includeAudio: share.includeAudio, createdAt: share.createdAt, expiresAt: share.expiresAt, revokedAt: share.revokedAt, hasPassword: Boolean(share.passwordHash), viewCount: share.viewCount, scope: share.scope };
 }
 
@@ -43,7 +51,7 @@ export async function revokeShare(transcriptId: string, shareId: string) {
 
 export async function reissueShare(transcriptId: string, shareId: string) {
   const token = crypto.randomBytes(24).toString('base64url');
-  const [share] = await db.update(transcriptShares).set({ token, tokenHash: hashToken(token), revokedAt: null }).where(and(eq(transcriptShares.id, shareId), eq(transcriptShares.transcriptId, transcriptId))).returning();
+  const [share] = await db.update(transcriptShares).set({ token: null, tokenHash: hashToken(token), revokedAt: null }).where(and(eq(transcriptShares.id, shareId), eq(transcriptShares.transcriptId, transcriptId))).returning();
   return share ? presentShare(share, token) : null;
 }
 

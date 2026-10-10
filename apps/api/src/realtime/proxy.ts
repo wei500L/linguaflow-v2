@@ -4,7 +4,7 @@ import { and, eq, isNull } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { glossaries, glossaryTerms, realtimeSessions, transcriptSegments, transcripts } from '../db/schema.js';
 import { config } from '../config.js';
-import { foldCaptionTurns, type TranscriptToken } from '@linguaflow/shared';
+import { acceptPcmFrame, foldCaptionTurns, PCM_BYTES_PER_SECOND, type TranscriptToken } from '@linguaflow/shared';
 import { settleUsage } from '../lib/quota.js';
 import { removeRecording } from '../lib/recordings.js';
 import { scheduleRecordingEncode } from './encode.js';
@@ -18,6 +18,13 @@ const RECONNECT_GRACE_MS = 20_000;
 const UPSTREAM_KEEPALIVE_MS = 5_000;
 /** Phones freeze the browser keepalive timer before they stop the mic worklet. Audio has to refresh liveness too, or the 30-minute sweep ends a live session. */
 const CLAIM_TOUCH_MS = 30_000;
+
+/** Drizzle runs a query only from then(). `void query` never reaches the database. */
+function runQuiet(sessionId: string, query: PromiseLike<unknown>) {
+  void Promise.resolve(query).catch((error) => {
+    console.warn('[LinguaFlow] session heartbeat failed', sessionId, error);
+  });
+}
 
 function disableNagle(socket: WebSocket) {
   const raw = (socket as WebSocket & { _socket?: { setNoDelay?: (on: boolean) => void } })._socket;
@@ -36,6 +43,7 @@ type LiveRoom = {
   startedAt?: Date;
   /** PCM bytes forwarded to Soniox. A reconnecting host realigns its latency clock with this. */
   forwardedAudioBytes: number;
+  lastAudioAt?: number;
   allowed: number;
   ended: boolean;
   stopRequested: boolean;
@@ -49,6 +57,18 @@ const rooms = new Map<string, LiveRoom>();
 
 export function hasLiveRoom(id: string) {
   return rooms.has(id);
+}
+
+export function roomHeardRecently(id: string, withinMs = 30 * 60 * 1000, now = Date.now()) {
+  const heard = rooms.get(id)?.lastAudioAt;
+  return typeof heard === 'number' && now - heard < withinMs;
+}
+
+export function audienceRoomState(sessionId: string): 'live' | 'saving' | null {
+  const room = rooms.get(sessionId);
+  if (!room) return null;
+  if (room.ended || room.stopRequested) return 'saving';
+  return 'live';
 }
 
 function sendJson(socket: WebSocket, payload: unknown) {
@@ -132,7 +152,10 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
   }
 
   const loadedGlossary = await loadSessionTerms(session.userId, session.glossaryId);
-  const upstream = new WebSocket(config.sonioxWsUrl, { perMessageDeflate: false });
+  const upstream = new WebSocket(config.sonioxWsUrl, {
+    perMessageDeflate: false,
+    headers: { Authorization: `Bearer ${config.sonioxApiKey}` }
+  });
   let startedAt: Date | undefined;
   let ended = false;
   let limitTimer: NodeJS.Timeout | undefined;
@@ -277,7 +300,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     startedAt = new Date();
     await db.update(realtimeSessions).set({ startedAt, status: 'active' }).where(and(eq(realtimeSessions.id, session.id), eq(realtimeSessions.status, 'connecting')));
     if (ended || upstream.readyState !== upstream.OPEN) return;
-    upstream.send(JSON.stringify(buildSonioxConfig(config.sonioxApiKey, session, loadedGlossary.terms, loadedGlossary.glossary)));
+    upstream.send(JSON.stringify(buildSonioxConfig(session, loadedGlossary.terms, loadedGlossary.glossary)));
     upstreamKeepalive = setInterval(keepUpstreamAlive, UPSTREAM_KEEPALIVE_MS);
     upstreamKeepalive.unref();
     const allowed = room.allowed;
@@ -324,7 +347,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     const now = Date.now();
     if (now - lastClaimTouchMs < CLAIM_TOUCH_MS) return;
     lastClaimTouchMs = now;
-    void db.update(realtimeSessions).set({ claimedAt: new Date(now) }).where(eq(realtimeSessions.id, session.id));
+    runQuiet(session.id, db.update(realtimeSessions).set({ claimedAt: new Date(now) }).where(eq(realtimeSessions.id, session.id)));
   };
   const bindClient = (socket: WebSocket) => {
     room.client = socket;
@@ -351,12 +374,18 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
             return;
           }
           if (stopRequested || upstream.readyState !== upstream.OPEN) return;
-          if (event.type === 'keepalive') { lastClaimTouchMs = Date.now(); void db.update(realtimeSessions).set({ claimedAt: new Date() }).where(eq(realtimeSessions.id, session.id)); return void upstream.send(data); }
+          if (event.type === 'keepalive') { lastClaimTouchMs = Date.now(); runQuiet(session.id, db.update(realtimeSessions).set({ claimedAt: new Date() }).where(eq(realtimeSessions.id, session.id))); return void upstream.send(data); }
         } catch { /* Ignore malformed control frames. */ }
         return;
       }
       if (stopRequested || upstream.readyState !== upstream.OPEN) return;
       const pcm = Buffer.isBuffer(message) ? message : Buffer.from(message);
+      room.lastAudioAt = Date.now();
+      if (!acceptPcmFrame(room.forwardedAudioBytes, pcm.length, room.allowed)) {
+        sendJson(socket, { type: 'error', code: 'quota_exhausted' });
+        void requestDrain('quota_exhausted');
+        return;
+      }
       if (pcm.length) recorder?.push(pcm);
       upstream.send(message);
       room.forwardedAudioBytes += pcm.length;
@@ -370,7 +399,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
       if (room.reconnectTimer) clearTimeout(room.reconnectTimer);
       room.reconnectTimer = setTimeout(() => { void requestDrain('client_closed'); }, RECONNECT_GRACE_MS);
       room.reconnectTimer.unref();
-      void db.update(realtimeSessions).set({ status: 'reconnecting', claimedAt: new Date() }).where(and(eq(realtimeSessions.id, session.id), isNull(realtimeSessions.endedAt)));
+      runQuiet(session.id, db.update(realtimeSessions).set({ status: 'reconnecting', claimedAt: new Date() }).where(and(eq(realtimeSessions.id, session.id), isNull(realtimeSessions.endedAt))));
     });
   };
   room.bindClient = bindClient;
@@ -395,7 +424,7 @@ export async function handleReconnectSocket(client: WebSocket, token: string) {
   room.bindClient(client);
   const elapsed = room.startedAt ? Math.floor((Date.now() - room.startedAt.getTime()) / 1000) : 0;
   if (client.readyState === client.OPEN) {
-    client.send(JSON.stringify({ type: 'ready', sessionId: session.id, allowedSeconds: Math.max(0, room.allowed - elapsed), receivedAudioMs: room.forwardedAudioBytes / 32 }));
+    client.send(JSON.stringify({ type: 'ready', sessionId: session.id, allowedSeconds: Math.max(0, room.allowed - elapsed), receivedAudioMs: room.forwardedAudioBytes / (PCM_BYTES_PER_SECOND / 1000) }));
     client.send(JSON.stringify({ type: 'snapshot', tokens: room.finalTokens, speakerNames: room.speakerNames }));
   }
 }

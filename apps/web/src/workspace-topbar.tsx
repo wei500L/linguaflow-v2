@@ -1,17 +1,20 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Entitlement } from '@linguaflow/shared';
+import { usableSeconds } from './format';
 import { tr } from './lib/i18n';
 import { LanguageToggle } from './language-toggle';
 import { ThemeToggle } from './theme-toggle';
 import { MenuIcon } from './icons';
 
-export type Panel = 'none' | 'transcripts' | 'glossary' | 'pricing' | 'admin' | 'account';
+export type Panel = 'none' | 'transcripts' | 'glossary' | 'pricing' | 'invite' | 'admin' | 'account';
 export type ServiceStatus = 'checking' | 'online' | 'offline';
 
+/* Invite sits with the other workspace pages so the reward is not buried in plans. */
 const navItems: Array<{ panel: Panel; label: string; adminOnly?: boolean }> = [
   { panel: 'transcripts', label: '字幕库' },
   { panel: 'glossary', label: '术语库' },
   { panel: 'pricing', label: '会员' },
+  { panel: 'invite', label: '邀请' },
   { panel: 'account', label: '账户' },
   { panel: 'admin', label: '后台', adminOnly: true }
 ];
@@ -29,7 +32,8 @@ export function Topbar({ entitlement, serviceStatus, isAdmin, live, onPanel, onL
   const [menuOpen, setMenuOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const statusLabel = serviceStatus === 'checking' ? tr('检查服务中') : serviceStatus === 'online' ? tr('实时服务正常') : tr('实时服务异常');
-  const quota = entitlement ? `${entitlement.plan.toUpperCase()} · ${entitlement.remainingSeconds === Number.MAX_SAFE_INTEGER ? '∞' : Math.ceil(entitlement.remainingSeconds / 60)} ${tr('分钟')}` : '';
+  const available = entitlement ? usableSeconds(entitlement) : 0;
+  const quota = entitlement ? `${entitlement.plan.toUpperCase()} · ${available >= Number.MAX_SAFE_INTEGER / 2 ? '∞' : Math.ceil(available / 60)} ${tr('分钟')}` : '';
   const items = navItems.filter((item) => !item.adminOnly || isAdmin);
 
   useEffect(() => {

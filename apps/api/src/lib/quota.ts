@@ -1,7 +1,8 @@
-import { PLANS, splitQuotaCharge, summaryChargeSeconds, type Entitlement, type Plan } from '@linguaflow/shared';
-import { and, eq, sql as query } from 'drizzle-orm';
+import { PLANS, REFERRAL, splitQuotaCharge, summaryChargeSeconds, type Entitlement, type Plan } from '@linguaflow/shared';
+import { and, eq, inArray, sql as query } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { entitlements, realtimeSessions, usageLedger } from '../db/schema.js';
+import { deviceClaims, entitlements, realtimeSessions, referrals, usageLedger, users } from '../db/schema.js';
+import { claimBlocks, claimKeys, freeDeviceBlockedMessage, serverClaimKeys, type DeviceRef } from './device.js';
 
 const addMonth = (date: Date) => new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()));
 
@@ -24,6 +25,29 @@ export function remainingSeconds(row: typeof entitlements.$inferSelect) {
   return monthly === null ? Number.MAX_SAFE_INTEGER : Math.max(0, (monthly ?? 0) - row.usedSecondsThisPeriod);
 }
 
+type ClaimExecutor = Pick<typeof db, 'insert' | 'select' | 'update'>;
+
+/* Insert first so two free accounts serialize on the same key. A released row
+   can be taken. An active row owned by someone else rejects this transaction,
+   which rolls the insert back. Settling a session must not grab the key again:
+   an admin release would otherwise be undone when the old session ends. */
+export async function holdFreeDevice(tx: ClaimExecutor, userId: string, fingerprintHash: string | null, deviceId: string | null, strong = true) {
+  const [account] = await tx.select({ signupIp: users.signupIp, email: users.email }).from(users).where(eq(users.id, userId));
+  const keys = [
+    ...(fingerprintHash && deviceId ? claimKeys(fingerprintHash, deviceId, strong) : []),
+    ...serverClaimKeys({ signupIp: account?.signupIp, email: account?.email })
+  ];
+  if (!keys.length) return;
+  const now = new Date();
+  await tx.insert(deviceClaims).values(keys.map((key) => ({ key, claimedBy: userId, claimedAt: now, releasedAt: null }))).onConflictDoNothing({ target: deviceClaims.key });
+  const rows = await tx.select().from(deviceClaims).where(inArray(deviceClaims.key, keys)).for('update');
+  if (rows.some((row) => claimBlocks({ userId: row.claimedBy, releasedAt: row.releasedAt, key: row.key, claimedAt: row.claimedAt }, userId, now))) {
+    throw Object.assign(new Error(freeDeviceBlockedMessage), { statusCode: 403, code: 'free_device_blocked' });
+  }
+  const take = rows.filter((row) => row.releasedAt || (row.key.startsWith('ip:') && row.claimedBy !== userId)).map((row) => row.key);
+  if (take.length) await tx.update(deviceClaims).set({ claimedBy: userId, claimedAt: now, releasedAt: null }).where(inArray(deviceClaims.key, take));
+}
+
 export function publicEntitlement(row: typeof entitlements.$inferSelect): Entitlement {
   return { plan: row.plan as Plan, planExpiresAt: row.planExpiresAt?.toISOString() ?? null,
     remainingSeconds: remainingSeconds(row), addonSeconds: row.addonSeconds,
@@ -32,7 +56,7 @@ export function publicEntitlement(row: typeof entitlements.$inferSelect): Entitl
 }
 
 export async function settleUsage(userId: string, sessionId: string, seconds: number, reason: string) {
-  return db.transaction(async (tx) => {
+  const result = await db.transaction(async (tx) => {
     const [row] = await tx.select().from(entitlements).where(eq(entitlements.userId, userId)).for('update');
     if (!row) throw new Error('Missing entitlement');
     const [session] = await tx.select().from(realtimeSessions).where(eq(realtimeSessions.id, sessionId)).for('update');
@@ -49,15 +73,29 @@ export async function settleUsage(userId: string, sessionId: string, seconds: nu
     if (planSeconds) await tx.insert(usageLedger).values({ userId, sessionId, seconds: planSeconds, source: 'plan' });
     if (addonSeconds) await tx.insert(usageLedger).values({ userId, sessionId, seconds: addonSeconds, source: 'addon' });
     await tx.update(realtimeSessions).set({ endedAt: new Date(), billedSeconds, endReason: reason, status: reason === 'cancelled' ? 'cancelled' : 'finished' }).where(eq(realtimeSessions.id, sessionId));
+    if (reason !== 'cancelled' && billedSeconds >= REFERRAL.qualifySeconds) {
+      await tx.update(referrals).set({ status: 'grant_due', qualifiedSessionId: sessionId }).where(and(eq(referrals.inviteeId, userId), eq(referrals.status, 'pending')));
+    }
     return { billedSeconds, settled: true };
   });
+  /* referral.ts reads devices through device-store, which imports this module.
+     A static import would cycle, and a failed grant must not undo the settlement. */
+  if (result.settled && reason !== 'cancelled' && result.billedSeconds >= REFERRAL.qualifySeconds) {
+    try {
+      const { qualifyReferral } = await import('./referral.js');
+      await qualifyReferral(userId, sessionId);
+    } catch (error) {
+      console.error('[LinguaFlow] referral grant failed', error);
+    }
+  }
+  return result;
 }
 
 export function platformSummarySeconds(charCount: number, plan: Plan) {
   return summaryChargeSeconds(charCount, PLANS[plan].monthlySeconds === null);
 }
 
-export async function reserveSummaryUsage(userId: string, transcriptId: string, charCount: number) {
+export async function reserveSummaryUsage(userId: string, transcriptId: string, charCount: number, device?: DeviceRef | null) {
   const row = await ensureEntitlement(userId);
   const requested = platformSummarySeconds(charCount, row.plan as Plan);
   if (requested <= 0) return { seconds: 0 };
@@ -65,6 +103,7 @@ export async function reserveSummaryUsage(userId: string, transcriptId: string, 
     const [locked] = await tx.select().from(entitlements).where(eq(entitlements.userId, userId)).for('update');
     const split = splitQuotaCharge(requested, remainingSeconds(locked), locked.addonSeconds);
     if (!split.covered) throw Object.assign(new Error('平台纪要额度不足。'), { statusCode: 402, code: 'quota_exhausted' });
+    if (locked.plan === 'free' && split.planSeconds > 0) await holdFreeDevice(tx, userId, device?.fingerprintHash ?? null, device?.deviceId ?? null, device?.strong !== false);
     await tx.update(entitlements).set({
       usedSecondsThisPeriod: query`${entitlements.usedSecondsThisPeriod} + ${split.planSeconds}`,
       addonSeconds: query`${entitlements.addonSeconds} - ${split.addonSeconds}`

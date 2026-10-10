@@ -136,6 +136,29 @@
   font-weight: 600;
 }
 
+.invite-welcome {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  background: var(--surface-2);
+}
+
+.invite-welcome p {
+  margin: 0;
+}
+
+.invite-welcome strong {
+  font-size: var(--text-lg);
+  letter-spacing: .08em;
+  font-variant-numeric: tabular-nums;
+}
+
+.invite-welcome .panel-description {
+  margin: 0;
+}
+
 /* Replaces a negative margin that broke whenever the input height changed. */
 .password-field {
   position: relative;

@@ -426,6 +426,18 @@ textarea {
   flex: 1 1 140px;
 }
 
+.summary-controls > .provider-note,
+.summary-advanced {
+  flex: 1 1 100%;
+  margin: 0;
+}
+
+.summary-advanced summary {
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
 .title-row > .provider-note {
   flex: 1 1 100%;
 }
@@ -465,6 +477,22 @@ textarea {
   color: var(--danger);
   font-size: var(--text-sm);
   line-height: 1.5;
+}
+
+.error-banner.has-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.error-banner.has-actions > span {
+  flex: 1 1 12rem;
+}
+
+.error-banner .primary-button,
+.error-banner .link-button {
+  width: auto;
 }
 
 .success-message {

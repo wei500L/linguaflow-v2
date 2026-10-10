@@ -84,6 +84,7 @@ export type ControlDockProps = {
   mics: Array<{ id: string; label: string }>;
   micId: string;
   recordAudio: boolean;
+  voiceBoost: boolean;
   sessionTitle: string;
   liveSessionId: string | null;
   captionView: CaptionView;
@@ -94,6 +95,7 @@ export type ControlDockProps = {
   timeWarning: boolean;
   hasCaptions: boolean;
   planLabel: string;
+  rejoin: boolean;
   onDockOpen: (open: boolean) => void;
   onCaptionOpen: (open: boolean) => void;
   onMode: (mode: 'one_way' | 'two_way') => void;
@@ -103,6 +105,7 @@ export type ControlDockProps = {
   onAudioSource: (value: AudioSource) => void;
   onMic: (value: string) => void;
   onRecordAudio: (value: boolean) => void;
+  onVoiceBoost: (value: boolean) => void;
   onSessionTitle: (value: string) => void;
   onCaptionView: (value: CaptionView) => void;
   onCaptionSize: (value: string) => void;
@@ -118,8 +121,8 @@ export function ControlDock(props: ControlDockProps) {
   const {
     phone, sessionStatus, busySession, running, paused, closePrompt, dockOpen, captionOpen,
     mode, languages, languageA, languageB, sameLanguage, glossaryId, glossaryChoices, glossaryHint,
-    audioSource, mics, micId, recordAudio, sessionTitle, liveSessionId,
-    captionView, captionSize, fullscreen, directionLabel, remainingLabel, timeWarning, hasCaptions, planLabel
+    audioSource, mics, micId, recordAudio, voiceBoost, sessionTitle, liveSessionId,
+    captionView, captionSize, fullscreen, directionLabel, remainingLabel, timeWarning, hasCaptions, planLabel, rejoin
   } = props;
 
   const primaryLabel = sessionStatus === 'opening' ? tr('正在打开麦克风…')
@@ -128,6 +131,7 @@ export function ControlDock(props: ControlDockProps) {
     : sessionStatus === 'stopping' ? tr('结束中…')
     : closePrompt ? tr('保存并结束')
     : running ? tr('结束翻译')
+    : rejoin ? tr('继续这场翻译')
     : tr('开始翻译');
   const arming = sessionStatus === 'opening' || sessionStatus === 'connecting' || sessionStatus === 'reconnecting';
   const cancellable = sessionStatus === 'opening' || sessionStatus === 'connecting';
@@ -174,6 +178,10 @@ export function ControlDock(props: ControlDockProps) {
         <input type="checkbox" checked={recordAudio} onChange={(event) => props.onRecordAudio(event.target.checked)} disabled={busySession} aria-label={tr('保存本次语音')} />
         <span>{tr('保存本次语音')}</span>
       </label>
+      <div className="stage-tools">
+        <button type="button" className={voiceBoost ? 'active' : ''} aria-pressed={voiceBoost} onClick={() => props.onVoiceBoost(!voiceBoost)}>{tr('声音增强')}</button>
+      </div>
+      <p className="audio-hint">{tr('老师声音偏小时打开。只抬高于环境噪声的语音，并减弱低频隆隆声。字幕和录音走的是同一路声音，翻译过程中可以随时开关。')}</p>
     </Section>
 
     <Section title={tr('字幕显示')}>
@@ -243,7 +251,7 @@ export function ControlDock(props: ControlDockProps) {
       {!phone && <span className={`direction-badge${timeWarning ? ' time-warning' : ''}`}>{directionLabel}{remainingLabel}</span>}
     </div>
     {dockOpen && !phone && <div className="dock-foot">
-      <span>{tr('音频：')}{audioSource === 'system' ? tr('系统声音') : tr('麦克风')}</span>
+      <span>{tr('音频：')}{audioSource === 'system' ? tr('系统声音') : tr('麦克风')}{voiceBoost ? ` · ${tr('声音增强')}` : ''}</span>
       <span>{planLabel}</span>
     </div>}
   </aside>;

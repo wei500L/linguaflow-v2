@@ -1,17 +1,18 @@
 import { StrictMode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, LANGUAGE_OPTIONS, PLANS, type Entitlement, type RealtimeEvent, type TranscriptToken } from '@linguaflow/shared';
-import { api, ApiError, apiResponse, clearToken, getToken, isTokenExpired, openSocket, setToken, tokenExpiresWithin } from './lib/api';
+import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, PLANS, type Entitlement, type RealtimeEvent, type TranscriptToken } from '@linguaflow/shared';
+import { api, ApiError, clearToken, getToken, isTokenExpired, openSocket, setToken, tokenExpiresWithin } from './lib/api';
+import { shouldRefreshAccessToken } from './lib/session';
 import { PHONE_QUERY, useMediaQuery, useViewportHeight } from './lib/breakpoints';
 import { createPcmStream, listAudioInputs, trimQueuedAudio, type AudioSource } from './lib/audio';
-import { glossaryOptionLabel, languageNative, sameLanguageCode } from './lib/glossary';
+import { VoiceBoost } from './lib/voice-boost';
+import { languageNative } from './lib/glossary';
 import { lockProgrammaticScroll, nudgeToBottom } from './lib/follow-scroll';
+import { InvitePanel } from './invite-panel';
+import { captureInvite } from './lib/invite';
 import { getLang, tr, useLang } from './lib/i18n';
 import { alignSentAudio, commitSentChunk, createLatencyClock, observeTranscript, readLatency, sameReadout, stampChunk, startMeasuring, type LatencyClock, type LatencyReadout } from './lib/latency';
-import { LanguageToggle } from './language-toggle';
-import { ThemeToggle } from './theme-toggle';
 import { LegalPage, MarketingPage } from './marketing';
-import { ListSkeleton, PanelShell } from './panel-shell';
 import { SharePage } from './share-page';
 import { TranscriptPanel } from './transcript-panel';
 import { FirstRun } from './first-run';
@@ -23,315 +24,31 @@ import { LatencyBadge } from './latency-badge';
 import { SessionNotices, type Notice } from './session-notices';
 import './styles.css';
 
+import { AccountPanel } from './account-panel';
+import { AdminPanel } from './admin-panel';
+import { AuthScreen } from './auth-screen';
+import { formatRemain, usableSeconds } from './format';
+import { GlossaryPanel, type Glossary } from './glossary-panel';
+import { PricingPanel } from './pricing-panel';
+
+
 type Profile = { id: string; email: string; displayName?: string | null; role: string };
-
-function authFailure(error: unknown) {
-  const message = error instanceof Error ? error.message : '';
-  if (message === 'Invalid credentials') return tr('邮箱或密码不正确。');
-  if (message === 'Too many login attempts') return tr('尝试次数过多，请 15 分钟后再试。');
-  if (message === 'Invalid verification code') return tr('验证码不正确。');
-  if (message === 'Account not found') return tr('找不到这个账户。');
-  if (message === 'Email already registered') return tr('这个邮箱已经注册过了。');
-  if (message === 'Check the email and password, then try again' || message.includes('Invalid email') || message.startsWith('[')) return tr('邮箱格式不正确，请检查空格后重试。');
-  if (message === 'Load failed' || message === 'Failed to fetch' || message === 'NetworkError when attempting to fetch resource.') return tr('网络中断了，请再试一次。');
-  return message ? tr(message) : tr('操作失败');
-}
-
-function AuthScreen({ onLogin }: { onLogin: () => void }) {
-  const [mode, setMode] = useState<'login' | 'register' | 'code_login' | 'reset'>('login');
-  const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false); const [cooldown, setCooldown] = useState(0); const [showPassword, setShowPassword] = useState(false);
-  const formRef = useRef<HTMLFormElement>(null); const codeInput = useRef<HTMLInputElement>(null); const messageRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { if (cooldown <= 0) return; const timer = window.setTimeout(() => setCooldown(cooldown - 1), 1000); return () => window.clearTimeout(timer); }, [cooldown]);
-  useEffect(() => { if (message) messageRef.current?.scrollIntoView({ block: 'nearest' }); }, [message]);
-  /* Inputs stay uncontrolled. A phone password manager fills the DOM without a
-     React onChange, and the next render was wiping that value before submit. */
-  function credentials() {
-    const data = new FormData(formRef.current ?? undefined);
-    return {
-      email: String(data.get('email') ?? '').replace(/\s+/g, ''),
-      password: String(data.get('password') ?? '').trim(),
-      code: String(data.get('code') ?? '').trim()
-    };
-  }
-  async function sendVerificationCode() {
-    const { email } = credentials();
-    if (!email) { setMessage(tr('请先填写邮箱。')); return; }
-    const path = mode === 'register' ? '/v1/auth/email/register/code' : mode === 'reset' ? '/v1/auth/email/password-reset/code' : '/v1/auth/email/login/code';
-    await api(path, { method: 'POST', body: JSON.stringify({ email }) });
-    setCooldown(60); setMessage(tr('验证码已发送，请查收邮箱。')); codeInput.current?.focus();
-  }
-  async function submit(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const { email, password, code } = credentials();
-    if (!email) { setMessage(tr('请先填写邮箱。')); return; }
-    if (mode !== 'code_login' && password.length < 8) { setMessage(tr('密码至少 8 位。')); return; }
-    if ((mode === 'code_login' || mode === 'reset') && code.length < 6) { setMessage(tr('请填写 6 位验证码。')); return; }
-    setBusy(true); setMessage('');
-    try {
-      if (mode === 'register') {
-        if (!code) { await sendVerificationCode(); return; }
-        const result = await api<{ token: string }>('/v1/auth/email/register', { method: 'POST', body: JSON.stringify({ email, password, code }) });
-        setToken(result.token); onLogin();
-      } else if (mode === 'code_login') {
-        const result = await api<{ token: string }>('/v1/auth/email/login/code/verify', { method: 'POST', body: JSON.stringify({ email, code }) });
-        setToken(result.token); onLogin();
-      } else if (mode === 'reset') {
-        await api('/v1/auth/email/password-reset', { method: 'POST', body: JSON.stringify({ email, code, password }) });
-        setMode('login'); setMessage(tr('密码已重置，请登录。'));
-      } else {
-        const result = await api<{ token: string }>('/v1/auth/email/login/password', { method: 'POST', body: JSON.stringify({ email, password }) });
-        setToken(result.token); onLogin();
-      }
-    } catch (error) { setMessage(authFailure(error)); } finally { setBusy(false); }
-  }
-  return <main className="auth-layout"><section className="auth-pitch"><div className="brand-mark">L</div><p className="eyebrow">LINGUAFLOW</p><h1>{tr('让每一次对话，')}<br /><em>{tr('自然地抵达')}</em></h1><p>{tr('实时语音识别、翻译与字幕记录，适用于会议、课堂和跨语言交流。')}</p><div className="demo-card"><span>ZH · 00:18</span><strong>{tr('欢迎来到 LinguaFlow')}</strong><small>Welcome to LinguaFlow</small></div></section><form ref={(node) => { formRef.current = node; if (node) node.noValidate = true; }} key={mode} className="auth-card" onSubmit={submit}><div className="auth-card-header"><div className="menu-row"><ThemeToggle /><LanguageToggle className="secondary-button" /></div><h2>{mode === 'register' ? tr('创建账户') : mode === 'reset' ? tr('重置密码') : tr('登录 LinguaFlow')}</h2><p>{tr('继续使用你的实时翻译工作区')}</p></div><label>{tr('邮箱')}<input name="email" type="email" required placeholder="you@example.com" autoComplete="username" autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="next" inputMode="email" /></label>{mode !== 'code_login' && <label>{mode === 'reset' ? tr('新密码') : tr('密码')}<span className="password-field"><input name="password" type={showPassword ? 'text' : 'password'} required minLength={8} placeholder={tr('至少 8 位字符')} autoComplete={mode === 'reset' || mode === 'register' ? 'new-password' : 'current-password'} autoCapitalize="none" autoCorrect="off" spellCheck={false} enterKeyHint="go" /><button type="button" className="password-toggle" aria-label={showPassword ? tr('隐藏密码') : tr('显示密码')} onClick={() => setShowPassword((value) => !value)}>{showPassword ? tr('隐藏') : tr('显示')}</button></span></label>}{mode !== 'login' && <label>{tr('验证码')}<input ref={codeInput} name="code" inputMode="numeric" placeholder={tr('邮箱验证码')} required={mode !== 'register'} autoComplete="one-time-code" enterKeyHint="go" /></label>}{mode !== 'login' && <button type="button" className="link-button" disabled={cooldown > 0 || busy} onClick={() => void sendVerificationCode().catch((error) => setMessage(authFailure(error)))}>{cooldown > 0 ? `${cooldown} ${tr('秒后重发')}` : tr('发送验证码')}</button>}{message && <div ref={messageRef} className="form-message" role="alert">{message}</div>}<button className="primary-button auth-submit" type="submit" disabled={busy}>{busy ? tr('处理中…') : mode === 'login' ? tr('登录') : mode === 'register' ? tr('完成注册') : mode === 'reset' ? tr('重置密码') : tr('验证码登录')}</button><div className="auth-links"><button type="button" className="link-button" onClick={() => { setMode('code_login'); setMessage(''); }}>{tr('验证码登录')}</button><button type="button" className="link-button" onClick={() => { setMode('reset'); setMessage(''); }}>{tr('忘记密码')}</button><button type="button" className="link-button" onClick={() => { setMode(mode === 'register' ? 'login' : 'register'); setMessage(''); }}>{mode === 'register' ? tr('返回登录') : tr('创建账户')}</button></div><p className="auth-legal"><a href="/privacy">{tr('隐私政策')}</a><a href="/terms">{tr('服务条款')}</a></p></form></main>;
-}
-
-type GlossaryTerm = { id: string; source: string; target: string; pinned?: boolean };
-type Glossary = { id: string; name: string; languageA: string; languageB: string; terms?: GlossaryTerm[] };
-
-function LanguagePairFields({ a, b, onA, onB }: { a: string; b: string; onA: (value: string) => void; onB: (value: string) => void }) {
-  return <div className="term-row"><select value={a} onChange={(event) => onA(event.target.value)} aria-label={tr('原语言')}>{LANGUAGE_OPTIONS.map((option) => <option value={option.code} key={option.code}>{option.nativeName}</option>)}</select><span>→</span><select value={b} onChange={(event) => onB(event.target.value)} aria-label={tr('翻译为')}>{LANGUAGE_OPTIONS.map((option) => <option value={option.code} key={`b-${option.code}`}>{option.nativeName}</option>)}</select></div>;
-}
-
-function GlossaryPanel({ onClose, languageA, languageB, activeId, onActive, onList }: { onClose: () => void; languageA: string; languageB: string; activeId: string; onActive: (id: string) => void; onList: (items: Glossary[]) => void }) {
-  const [items, setItems] = useState<Glossary[]>([]); const [name, setName] = useState('我的术语库'); const [source, setSource] = useState(''); const [target, setTarget] = useState(''); const [draftSource, setDraftSource] = useState(''); const [draftTarget, setDraftTarget] = useState(''); const [editingId, setEditingId] = useState<string | null>(null); const [loading, setLoading] = useState(true); const [saving, setSaving] = useState(false); const [error, setError] = useState(''); const [message, setMessage] = useState('');
-  const [glossaryName, setGlossaryName] = useState(''); const [langA, setLangA] = useState(languageA); const [langB, setLangB] = useState(languageB); const [createLangA, setCreateLangA] = useState(languageA); const [createLangB, setCreateLangB] = useState(languageB); const [importText, setImportText] = useState('');
-  const selected = items.find((item) => item.id === activeId) ?? null;
-  async function refresh() {
-    setLoading(true); setError('');
-    try {
-      const rows = await api<Glossary[]>('/v1/me/glossaries');
-      setItems(rows);
-      onList(rows);
-      if (activeId && !rows.some((item) => item.id === activeId)) onActive('');
-    } catch (err) { setError(err instanceof Error ? err.message : '术语库加载失败'); } finally { setLoading(false); }
-  }
-  useEffect(() => { void refresh(); }, []);
-  useEffect(() => { if (!selected) return; setGlossaryName(selected.name); setLangA(selected.languageA); setLangB(selected.languageB); }, [selected?.id, selected?.name, selected?.languageA, selected?.languageB]);
-  async function createGlossary() {
-    if (!name.trim() || saving || sameLanguageCode(createLangA, createLangB)) return;
-    setSaving(true); setError(''); setMessage('');
-    try {
-      const created = await api<Glossary>('/v1/me/glossaries', { method: 'POST', body: JSON.stringify({ name: name.trim(), languageA: createLangA, languageB: createLangB }) });
-      onActive(created.id); setName('我的术语库'); setMessage(tr('词库已创建。')); await refresh();
-    } catch (err) { setError(err instanceof Error ? err.message : '创建术语库失败'); } finally { setSaving(false); }
-  }
-  async function addTerm() {
-    if (!selected || !source.trim() || !target.trim() || saving) return;
-    setSaving(true); setError(''); setMessage('');
-    try {
-      await api(`/v1/me/glossaries/${selected.id}/terms`, { method: 'POST', body: JSON.stringify({ source: source.trim(), target: target.trim() }) });
-      setSource(''); setTarget(''); setMessage(tr('术语已添加。')); await refresh();
-    } catch (err) { setError(err instanceof Error ? tr(err.message) : tr('添加术语失败')); } finally { setSaving(false); }
-  }
-  async function saveTerm(term: GlossaryTerm) {
-    if (!selected || !draftSource.trim() || !draftTarget.trim() || saving) return;
-    setSaving(true); setError(''); setMessage('');
-    try {
-      await api(`/v1/me/glossaries/${selected.id}/terms/${term.id}`, { method: 'PATCH', body: JSON.stringify({ source: draftSource.trim(), target: draftTarget.trim() }) });
-      setEditingId(null); setMessage(tr('术语已更新。')); await refresh();
-    } catch (err) { setError(err instanceof Error ? tr(err.message) : '更新术语失败'); } finally { setSaving(false); }
-  }
-  async function removeTerm(term: GlossaryTerm) {
-    if (!selected || !window.confirm(tr('确定删除这个词条吗？'))) return;
-    setError('');
-    try { await api(`/v1/me/glossaries/${selected.id}/terms/${term.id}`, { method: 'DELETE' }); if (editingId === term.id) setEditingId(null); await refresh(); }
-    catch (err) { setError(err instanceof Error ? tr(err.message) : '删除术语失败'); }
-  }
-  async function pinTerm(term: GlossaryTerm) {
-    if (!selected || saving) return;
-    setSaving(true); setError('');
-    try {
-      await api(`/v1/me/glossaries/${selected.id}/terms/${term.id}`, { method: 'PATCH', body: JSON.stringify({ source: term.source, target: term.target, pinned: !term.pinned }) });
-      await refresh();
-    } catch (err) { setError(err instanceof Error ? err.message : tr('更新术语失败')); }
-    finally { setSaving(false); }
-  }
-  async function usePreset(preset: 'analysis' | 'algebra' | 'discrete' | 'pascal' | 'practice' | 'history' | 'safety' | 'classroom' | 'medical' | 'legal') {
-    setSaving(true); setError('');
-    try {
-      const created = await api<Glossary>('/v1/me/glossaries/from-preset', { method: 'POST', body: JSON.stringify({ preset }) });
-      onActive(created.id); setMessage(tr('预置词库已加入。')); await refresh();
-    } catch (err) { setError(err instanceof Error ? err.message : tr('创建术语库失败')); }
-    finally { setSaving(false); }
-  }
-  async function removeGlossary(item: Glossary) {
-    if (!window.confirm(tr('确定删除“{name}”吗？').replace('{name}', item.name))) return;
-    try { await api(`/v1/me/glossaries/${item.id}`, { method: 'DELETE' }); if (activeId === item.id) onActive(''); await refresh(); }
-    catch (err) { setError(err instanceof Error ? err.message : '删除术语库失败'); }
-  }
-  async function saveGlossary() {
-    if (!selected || !glossaryName.trim() || saving || sameLanguageCode(langA, langB)) return;
-    setSaving(true); setError(''); setMessage('');
-    try {
-      await api(`/v1/me/glossaries/${selected.id}`, { method: 'PATCH', body: JSON.stringify({ name: glossaryName.trim(), languageA: langA, languageB: langB }) });
-      setMessage(tr('词库已保存。')); await refresh();
-    } catch (err) { setError(err instanceof Error ? err.message : '更新术语失败'); } finally { setSaving(false); }
-  }
-  async function importTerms() {
-    if (!selected || !importText.trim() || saving) return;
-    setSaving(true); setError(''); setMessage('');
-    try {
-      const result = await api<{ added: number; skippedDuplicate: number; skippedInvalid: number; skippedLimit: number }>(`/v1/me/glossaries/${selected.id}/import`, { method: 'POST', body: JSON.stringify({ text: importText }) });
-      const notes = [tr('已导入 {count} 条。').replace('{count}', String(result.added))];
-      if (result.skippedDuplicate) notes.push(tr('跳过重复 {count} 条。').replace('{count}', String(result.skippedDuplicate)));
-      if (result.skippedInvalid) notes.push(tr('跳过格式不对 {count} 条。').replace('{count}', String(result.skippedInvalid)));
-      if (result.skippedLimit) notes.push(tr('跳过超出上限 {count} 条。').replace('{count}', String(result.skippedLimit)));
-      setImportText(''); setMessage(notes.join(' ')); await refresh();
-    } catch (err) { setError(err instanceof Error ? err.message : '添加术语失败'); } finally { setSaving(false); }
-  }
-  async function exportTerms() {
-    if (!selected) return;
-    try {
-      const response = await apiResponse(`/v1/me/glossaries/${selected.id}/export`);
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url; anchor.download = `${selected.name}.txt`; document.body.append(anchor); anchor.click(); anchor.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) { setError(err instanceof Error ? err.message : '导出失败'); }
-  }
-  const orderedTerms = [...(selected?.terms ?? [])].sort((left, right) => Number(Boolean(right.pinned)) - Number(Boolean(left.pinned)));
-  return <PanelShell title={tr('术语库')} onClose={onClose}><p className="panel-description">{tr('单向按当前会话方向注入。方向相反时会自动对调。双向会话会同时使用反向译法。')}</p><div className="glossary-switch"><select value={activeId} onChange={(event) => onActive(event.target.value)} aria-label={tr('选择术语库')}><option value="">{tr('不使用术语库')}</option>{items.map((item) => <option value={item.id} key={item.id}>{glossaryOptionLabel(item)}</option>)}</select></div><div className="term-form"><input value={name} onChange={(event) => setName(event.target.value)} placeholder={tr('词库名称')} aria-label={tr('词库名称')} /><LanguagePairFields a={createLangA} b={createLangB} onA={setCreateLangA} onB={setCreateLangB} />{sameLanguageCode(createLangA, createLangB) && <p className="form-message" role="alert">{tr('源语言和目标语言不能相同。')}</p>}<button className="primary-button" onClick={() => void createGlossary()} disabled={saving || !name.trim() || sameLanguageCode(createLangA, createLangB)}>{tr('新建词库')}</button></div><div className="preset-groups"><div><p className="eyebrow">{tr('课程词库')}</p><p className="panel-description">{tr('每门课单独一份。点一次只新建这一门。')}</p><div className="list-item-actions"><button className="secondary-button" onClick={() => void usePreset('analysis')} disabled={saving}>{tr('数学分析词库')}</button><button className="secondary-button" onClick={() => void usePreset('algebra')} disabled={saving}>{tr('线性代数词库')}</button><button className="secondary-button" onClick={() => void usePreset('discrete')} disabled={saving}>{tr('离散数学词库')}</button><button className="secondary-button" onClick={() => void usePreset('pascal')} disabled={saving}>{tr('Pascal 词库')}</button><button className="secondary-button" onClick={() => void usePreset('practice')} disabled={saving}>{tr('计算机实践词库')}</button><button className="secondary-button" onClick={() => void usePreset('history')} disabled={saving}>{tr('历史词库')}</button><button className="secondary-button" onClick={() => void usePreset('safety')} disabled={saving}>{tr('生命安全词库')}</button></div></div><div><p className="eyebrow">{tr('通用词库')}</p><div className="list-item-actions"><button className="secondary-button" onClick={() => void usePreset('classroom')} disabled={saving}>{tr('课堂词库')}</button><button className="secondary-button" onClick={() => void usePreset('medical')} disabled={saving}>{tr('医学词库')}</button><button className="secondary-button" onClick={() => void usePreset('legal')} disabled={saving}>{tr('法律词库')}</button></div></div></div>{selected && <div className="term-form"><div className="term-row"><input value={source} onChange={(event) => setSource(event.target.value)} placeholder={languageNative(selected.languageA)} aria-label={tr('原文术语')} /><span>→</span><input value={target} onChange={(event) => setTarget(event.target.value)} placeholder={languageNative(selected.languageB)} aria-label={tr('指定译法')} /></div><button className="primary-button" onClick={() => void addTerm()} disabled={saving || !source.trim() || !target.trim()}>{saving ? tr('添加中…') : tr('添加术语')}</button></div>}{message && <div className="form-message success-message" role="status">{message}</div>}{error && <div className="form-message" role="alert">{error}</div>}<div className="panel-list">{loading && <ListSkeleton label={tr('正在加载术语库…')} />}{!loading && !items.length && <div className="panel-empty">{tr('还没有术语库。')}</div>}{selected && !selected.terms?.length && <div className="panel-empty">{tr('还没有词条。')}</div>}{orderedTerms.map((term) => <div className="panel-list-item" key={term.id}>{editingId === term.id ? <div className="term-edit"><input value={draftSource} onChange={(event) => setDraftSource(event.target.value)} aria-label={tr('原文术语')} /><span>→</span><input value={draftTarget} onChange={(event) => setDraftTarget(event.target.value)} aria-label={tr('指定译法')} /><button className="secondary-button" onClick={() => void saveTerm(term)} disabled={saving}>{tr('保存')}</button><button className="secondary-button" onClick={() => setEditingId(null)}>{tr('取消')}</button></div> : <div className="term-line"><span><strong>{term.pinned ? '★ ' : ''}{term.source}</strong><small>{term.target}</small></span><span className="list-item-actions"><button className="secondary-button" onClick={() => void pinTerm(term)}>{term.pinned ? tr('取消优先') : tr('优先')}</button><button className="secondary-button" onClick={() => { setEditingId(term.id); setDraftSource(term.source); setDraftTarget(term.target); }}>{tr('编辑')}</button><button className="danger-button" onClick={() => void removeTerm(term)}>{tr('删除词条')}</button></span></div>}</div>)}{selected && <div className="glossary-tools"><div className="term-form"><label>{tr('词库名称')}<input value={glossaryName} onChange={(event) => setGlossaryName(event.target.value)} /></label><div className="term-row"><LanguagePairFields a={langA} b={langB} onA={setLangA} onB={setLangB} /></div>{sameLanguageCode(langA, langB) && <p className="form-message" role="alert">{tr('源语言和目标语言不能相同。')}</p>}<div className="list-item-actions"><button className="secondary-button" onClick={() => void saveGlossary()} disabled={saving || sameLanguageCode(langA, langB)}>{tr('保存词库')}</button><button className="secondary-button" onClick={() => void exportTerms()}>{tr('导出术语')}</button><button className="danger-button" onClick={() => void removeGlossary(selected)}>{tr('删除')}</button></div></div><label>{tr('导入术语')}<textarea className="summary-editor" value={importText} onChange={(event) => setImportText(event.target.value)} placeholder={tr('每行一条，原文和译法用 Tab 分开。')} /></label><button className="secondary-button" onClick={() => void importTerms()} disabled={saving || !importText.trim()}>{tr('导入')}</button></div>}</div></PanelShell>;
-}
-
-function formatDuration(seconds: number) {
-  if (!Number.isFinite(seconds) || seconds >= Number.MAX_SAFE_INTEGER / 2) return tr('无限');
-  const whole = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(whole / 60);
-  const rest = whole % 60;
-  if (minutes <= 0) return `${rest} ${tr('秒')}`;
-  if (rest === 0) return `${minutes} ${tr('分钟')}`;
-  return `${minutes} ${tr('分钟')} ${rest} ${tr('秒')}`;
-}
-
-function formatDate(iso: string | null) {
-  if (!iso) return tr('无到期日');
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
-  return date.toLocaleDateString(document.documentElement.lang === 'en' ? 'en' : 'zh-CN', { year: 'numeric', month: 'short', day: 'numeric' });
-}
-
-function formatRemain(seconds: number) {
-  const whole = Math.max(0, Math.floor(seconds));
-  const minutes = Math.floor(whole / 60);
-  return `${minutes}:${String(whole % 60).padStart(2, '0')}`;
-}
-
-const planFit = { free: '适合先试一次短对话。', plus: '适合课堂和两小时以内的会议。', pro: '适合半天讲座和连续会议。', ultra: '适合全天活动。每月分钟不限，单次最长 12 小时。' } as const;
-type Redemption = { id: string; redeemedAt: string; grantedPlan: string | null; grantedMonths: number | null; grantedAddonSeconds: number };
-
-function PricingPanel({ onClose, entitlement, onRefresh }: { onClose: () => void; entitlement: Entitlement | null; onRefresh: () => void }) {
-  const [code, setCode] = useState(''); const [message, setMessage] = useState(''); const [busy, setBusy] = useState(false);
-  const [redemptions, setRedemptions] = useState<Redemption[]>([]);
-  useEffect(() => { void api<{ items: Redemption[] }>('/v1/billing/redemptions').then((result) => setRedemptions(result.items)).catch(() => undefined); }, [entitlement?.plan, entitlement?.addonSeconds]);
-  async function redeem() { if (!code.trim() || busy) return; setBusy(true); try { await api('/v1/billing/redeem', { method: 'POST', body: JSON.stringify({ code: code.trim() }) }); setMessage(tr('激活成功，额度已更新。')); onRefresh(); } catch (error) { setMessage(error instanceof Error ? error.message : '激活失败'); } finally { setBusy(false); } }
-  const monthlyLeft = entitlement?.remainingSeconds ?? 0;
-  const addon = entitlement?.addonSeconds ?? 0;
-  const usable = monthlyLeft >= Number.MAX_SAFE_INTEGER / 2 ? monthlyLeft : monthlyLeft + addon;
-  return <PanelShell title={tr('套餐与激活码')} onClose={onClose}>{entitlement && <div className="usage-card"><p className="eyebrow">{tr('当前额度')}</p><div className="admin-stat-grid usage-grid"><div><small>{tr('当前套餐')}</small><strong>{entitlement.plan.toUpperCase()}</strong></div><div><small>{tr('到期时间')}</small><strong>{entitlement.plan === 'free' || !entitlement.planExpiresAt ? tr('无到期日') : formatDate(entitlement.planExpiresAt)}</strong></div><div><small>{tr('本月已用')}</small><strong>{formatDuration(entitlement.usedSecondsThisPeriod)}</strong></div><div><small>{tr('本月剩余')}</small><strong>{formatDuration(monthlyLeft)}</strong></div><div><small>{tr('加时包')}</small><strong>{formatDuration(addon)}</strong></div><div><small>{tr('现在可用')}</small><strong>{formatDuration(usable)}</strong></div></div><p className="panel-description">{tr('本月已用分钟将在此日期重置：')} {formatDate(entitlement.periodEnd)}</p>{entitlement.status === 'expired' && <p className="panel-description">{tr('付费套餐已到期，当前已回到 Free。')}</p>}<p className="panel-description">{tr('先扣本月套餐分钟，用完后扣加时包。加时包不会按月清零。付费套餐到期后回到 Free，并重新计算本月已用分钟。单次会话不会超过套餐的单次上限，也不会超过当时剩余的套餐分钟加加时包。')}</p></div>}<p className="panel-description">{tr('四个套餐都能使用实时字幕、术语库、录音、导出和纪要。差别是每月分钟和单次时长。')}</p><p className="panel-description">{tr('套餐通过激活码开通，不能在应用内购买。')}</p><div className="plan-grid">{(['free', 'plus', 'pro', 'ultra'] as const).map((plan) => <div className={`plan-card ${entitlement?.plan === plan ? 'selected' : ''}`} key={plan}><p>{PLANS[plan].label}</p><strong>{PLANS[plan].monthlySeconds === null ? tr('无限') : Math.round(PLANS[plan].monthlySeconds / 60)} {tr('分钟/月')}</strong><small>{tr('单次最多')} {Math.round(PLANS[plan].maxSessionSeconds / 60)} {tr('分钟')}</small><small>{tr(planFit[plan])}</small></div>)}</div><div className="redeem-box"><p className="eyebrow">ACTIVATION CODE</p><h3>{tr('使用激活码')}</h3><div className="redeem-row"><input value={code} onChange={(event) => setCode(event.target.value)} placeholder={tr('激活码')} aria-label={tr('激活码')} autoComplete="off" /><button className="primary-button" onClick={() => void redeem()} disabled={busy}>{busy ? tr('兑换中…') : tr('兑换')}</button></div>{message && <p className="panel-description" role="status">{message}</p>}</div><div className="usage-list"><h3>{tr('兑换记录')}</h3>{redemptions.length === 0 && <p className="panel-description">{tr('还没有兑换记录。')}</p>}{redemptions.map((item) => <p className="panel-description" key={item.id}>{formatDate(item.redeemedAt)} · {item.grantedPlan ? tr('开通 {plan}').replace('{plan}', item.grantedPlan.toUpperCase()) : tr('加时包')}{item.grantedMonths ? ` · ${tr('{count} 个月').replace('{count}', String(item.grantedMonths))}` : ''}{item.grantedAddonSeconds ? ` · ${tr('加时 {minutes} 分钟').replace('{minutes}', String(Math.round(item.grantedAddonSeconds / 60)))}` : ''}</p>)}</div></PanelShell>;
-}
-
-function AccountPanel({ onClose, email, displayName, onProfile }: { onClose: () => void; email: string; displayName: string; onProfile: () => void }) {
-  const [currentPassword, setCurrentPassword] = useState(''); const [newPassword, setNewPassword] = useState(''); const [confirmPassword, setConfirmPassword] = useState('');
-  const [name, setName] = useState(displayName); const [nextEmail, setNextEmail] = useState(''); const [emailCode, setEmailCode] = useState(''); const [deleteEmail, setDeleteEmail] = useState('');
-  const [apiBase, setApiBase] = useState(''); const [model, setModel] = useState(''); const [apiKey, setApiKey] = useState(''); const [providerNote, setProviderNote] = useState('');
-  const [usage, setUsage] = useState<Array<{ id: string; kind: string; source: string; seconds: number; createdAt: string; title: string | null }>>([]);
-  const [message, setMessage] = useState(''); const [error, setError] = useState(''); const [busy, setBusy] = useState(false);
-  useEffect(() => { setName(displayName); }, [displayName]);
-  useEffect(() => { void api<{ items: Array<{ id: string; kind: string; source: string; seconds: number; createdAt: string; title: string | null }> }>('/v1/me/usage').then((result) => setUsage(result.items)).catch(() => undefined); void api<{ apiBase?: string; model?: string; hasKey?: boolean; keyHint?: string }>('/v1/me/summary-provider').then((value) => { setApiBase(value.apiBase ?? ''); setModel(value.model ?? ''); setProviderNote(value.keyHint ? `${tr('已保存密钥末四位')} ${value.keyHint}` : ''); }).catch(() => undefined); }, []);
-  async function submit(event: React.FormEvent) {
-    event.preventDefault(); setMessage(''); setError('');
-    if (newPassword !== confirmPassword) { setError(tr('两次输入的新密码不一致。')); return; }
-    setBusy(true);
-    try {
-      await api('/v1/me/password', { method: 'POST', body: JSON.stringify({ currentPassword, newPassword }) });
-      setCurrentPassword(''); setNewPassword(''); setConfirmPassword(''); setMessage(tr('密码已更新。'));
-    } catch (err) { setError(err instanceof Error ? tr(err.message) : tr('修改密码失败')); }
-    finally { setBusy(false); }
-  }
-  async function saveName(event: React.FormEvent) {
-    event.preventDefault(); setMessage(''); setError(''); setBusy(true);
-    try { await api('/v1/me/profile', { method: 'PATCH', body: JSON.stringify({ displayName: name.trim() }) }); setMessage(tr('显示名已保存。')); onProfile(); }
-    catch (err) { setError(err instanceof Error ? err.message : tr('修改密码失败')); }
-    finally { setBusy(false); }
-  }
-  async function sendEmailCode() {
-    setMessage(''); setError('');
-    try { await api('/v1/me/email/code', { method: 'POST', body: JSON.stringify({ email: nextEmail.trim() }) }); setMessage(tr('验证码已发送，请查收邮箱。')); }
-    catch (err) { setError(err instanceof Error ? err.message : tr('操作失败')); }
-  }
-  async function changeEmail(event: React.FormEvent) {
-    event.preventDefault(); setBusy(true); setMessage(''); setError('');
-    try { await api('/v1/me/email', { method: 'POST', body: JSON.stringify({ email: nextEmail.trim(), code: emailCode }) }); setMessage(tr('邮箱已更新。')); onProfile(); }
-    catch (err) { setError(err instanceof Error ? err.message : tr('操作失败')); }
-    finally { setBusy(false); }
-  }
-  async function saveProvider(event: React.FormEvent) {
-    event.preventDefault(); setBusy(true); setMessage(''); setError('');
-    try {
-      const saved = await api<{ keyHint?: string }>('/v1/me/summary-provider', { method: 'PUT', body: JSON.stringify({ apiBase, model, apiKey: apiKey || undefined }) });
-      setApiKey(''); setProviderNote(saved.keyHint ? `${tr('已保存密钥末四位')} ${saved.keyHint}` : ''); setMessage(tr('模型已保存。密钥不会再次显示。'));
-    } catch (err) { setError(err instanceof Error ? err.message : tr('保存模型失败')); }
-    finally { setBusy(false); }
-  }
-  async function exportData() {
-    try {
-      const response = await apiResponse('/v1/me/export');
-      const blob = await response.blob();
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url; anchor.download = 'linguaflow-export.json'; document.body.append(anchor); anchor.click(); anchor.remove();
-      URL.revokeObjectURL(url);
-    } catch (err) { setError(err instanceof Error ? err.message : tr('导出失败')); }
-  }
-  async function removeAccount(event: React.FormEvent) {
-    event.preventDefault();
-    if (deleteEmail.trim().toLowerCase() !== email.toLowerCase()) { setError(tr('邮箱确认不一致。')); return; }
-    setBusy(true);
-    try { await api('/v1/me/delete', { method: 'POST', body: JSON.stringify({ email: deleteEmail.trim() }) }); clearToken(); window.location.reload(); }
-    catch (err) { setError(err instanceof Error ? err.message : tr('操作失败')); setBusy(false); }
-  }
-  return <PanelShell title={tr('账户')} onClose={onClose}><p className="panel-description">{tr('登录邮箱')}</p><p className="account-email">{email}</p><form className="term-form" onSubmit={(event) => void saveName(event)}><label>{tr('显示名')}<input value={name} onChange={(event) => setName(event.target.value)} required /></label><button className="secondary-button" disabled={busy}>{tr('保存显示名')}</button></form><form className="term-form" onSubmit={(event) => void submit(event)}><h3>{tr('修改密码')}</h3><label>{tr('当前密码')}<input type="password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} autoComplete="current-password" required /></label><label>{tr('新密码')}<input type="password" minLength={8} value={newPassword} onChange={(event) => setNewPassword(event.target.value)} autoComplete="new-password" required placeholder={tr('至少 8 位字符')} /></label><label>{tr('确认新密码')}<input type="password" minLength={8} value={confirmPassword} onChange={(event) => setConfirmPassword(event.target.value)} autoComplete="new-password" required /></label>{message && <div className="form-message success-message" role="status">{message}</div>}{error && <div className="form-message" role="alert">{error}</div>}<button className="primary-button" disabled={busy}>{busy ? tr('保存中…') : tr('更新密码')}</button></form><form className="term-form" onSubmit={(event) => void changeEmail(event)}><h3>{tr('更换邮箱')}</h3><label>{tr('新邮箱')}<input type="email" value={nextEmail} onChange={(event) => setNextEmail(event.target.value)} required /></label><label>{tr('验证码')}<input value={emailCode} onChange={(event) => setEmailCode(event.target.value)} inputMode="numeric" /></label><button type="button" className="link-button" onClick={() => void sendEmailCode()}>{tr('发送验证码')}</button><button className="secondary-button" disabled={busy}>{tr('确认更换')}</button></form><form className="term-form" onSubmit={(event) => void saveProvider(event)}><h3>{tr('我的模型')}</h3><p className="panel-description">{tr('总结请求由 LinguaFlow 服务器发出，请填写服务器能够访问的地址。本机开发时可使用 http://127.0.0.1。')}</p><label>{tr('API 地址')}<input value={apiBase} onChange={(event) => setApiBase(event.target.value)} placeholder="https://api.openai.com/v1" autoComplete="off" /></label><label>{tr('模型名称')}<input value={model} onChange={(event) => setModel(event.target.value)} placeholder="gpt-4o-mini" autoComplete="off" /></label><label>{tr('API 密钥')}<input type="password" value={apiKey} onChange={(event) => setApiKey(event.target.value)} autoComplete="new-password" /></label>{providerNote && <p className="provider-note">{providerNote}</p>}<button className="secondary-button" disabled={busy || !apiBase.trim() || !model.trim()}>{tr('保存模型')}</button></form><div className="usage-list"><h3>{tr('用量记录')}</h3>{usage.length === 0 && <p className="panel-description">{tr('暂无用量。')}</p>}{usage.map((item) => <p className="panel-description" key={item.id}>{item.kind === 'summary' ? tr('平台纪要') : tr('实时翻译')} · {item.source === 'addon' ? tr('加时包') : tr('套餐分钟')} · {formatDuration(item.seconds)}{item.title ? ` · ${item.title}` : ''}</p>)}</div>{message && <div className="form-message success-message" role="status">{message}</div>}<button type="button" className="secondary-button" onClick={() => void exportData()}>{tr('导出数据')}</button><p className="auth-legal"><a href="/privacy">{tr('隐私政策')}</a><a href="/terms">{tr('服务条款')}</a></p><form className="term-form" onSubmit={(event) => void removeAccount(event)}><h3>{tr('注销账户')}</h3><p className="panel-description">{tr('注销后字幕、录音和术语库都会删除。')}</p><label>{tr('输入邮箱以确认注销')}<input type="email" value={deleteEmail} onChange={(event) => setDeleteEmail(event.target.value)} required /></label><button className="danger-button" disabled={busy}>{tr('确认注销')}</button></form></PanelShell>;
-}
-
-type AdminUser = { id: string; email: string; displayName?: string | null; plan?: string | null; addonSeconds?: number | null };
-type AdminCode = { id: string; codePrefix: string; plan: string | null; months: number | null; addonSeconds: number; redemptionCount: number; maxRedemptions: number; expiresAt: string | null; disabled: boolean; note: string | null };
-type AdminSession = { id: string; email: string | null; mode: string; status: string };
-type UsageTotal = { kind: string; source: string; seconds: number };
-
-function AdminPanel({ onClose }: { onClose: () => void }) {
-  const [count, setCount] = useState(1); const [plan, setPlan] = useState('plus'); const [months, setMonths] = useState(1); const [addonMinutes, setAddonMinutes] = useState(0); const [maxRedemptions, setMaxRedemptions] = useState(1); const [expiresInDays, setExpiresInDays] = useState(''); const [note, setNote] = useState(''); const [codes, setCodes] = useState<string[]>([]);
-  const [savedCodes, setSavedCodes] = useState<AdminCode[]>([]); const [users, setUsers] = useState<AdminUser[]>([]); const [query, setQuery] = useState(''); const [sessions, setSessions] = useState<AdminSession[]>([]); const [totals, setTotals] = useState<UsageTotal[]>([]); const [activeSessions, setActiveSessions] = useState(0);
-  const [grantPlan, setGrantPlan] = useState('plus'); const [grantMonths, setGrantMonths] = useState(1); const [grantMinutes, setGrantMinutes] = useState(60);
-  const [busy, setBusy] = useState(false); const [error, setError] = useState('');
-  async function load() {
-    const [codeRows, sessionRows, usage, userRows] = await Promise.all([
-      api<AdminCode[]>('/v1/admin/activation-codes'),
-      api<AdminSession[]>('/v1/admin/realtime-sessions'),
-      api<{ activeSessions: number; totals: UsageTotal[] }>('/v1/admin/usage'),
-      api<AdminUser[]>(`/v1/admin/users${query.trim() ? `?q=${encodeURIComponent(query.trim())}` : ''}`)
-    ]);
-    setSavedCodes(codeRows); setSessions(sessionRows); setTotals(usage.totals); setActiveSessions(usage.activeSessions); setUsers(userRows);
-  }
-  useEffect(() => { void load().catch((err) => setError(err instanceof Error ? err.message : '生成激活码失败')); }, []);
-  async function generate() { if (busy) return; setBusy(true); setError(''); try { const result = await api<{ codes: string[] }>('/v1/admin/activation-codes', { method: 'POST', body: JSON.stringify({ count, plan, months, addonSeconds: addonMinutes * 60, maxRedemptions, expiresInDays: expiresInDays.trim() ? Math.max(1, Number(expiresInDays) || 1) : undefined, note: note.trim() || undefined }) }); setCodes(result.codes); await load(); } catch (err) { setError(err instanceof Error ? err.message : '生成激活码失败'); } finally { setBusy(false); } }
-  async function copyCodes() { try { await navigator.clipboard.writeText(codes.join('\n')); } catch { setError('当前浏览器不允许复制激活码。'); } }
-  async function disableCode(id: string) { setError(''); try { await api(`/v1/admin/activation-codes/${id}`, { method: 'PATCH', body: JSON.stringify({ disabled: true }) }); await load(); } catch (err) { setError(err instanceof Error ? err.message : '操作失败'); } }
-  async function grant(userId: string) { setError(''); try { await api(`/v1/admin/users/${userId}/plan`, { method: 'POST', body: JSON.stringify({ plan: grantPlan, months: grantMonths }) }); await load(); } catch (err) { setError(err instanceof Error ? err.message : '操作失败'); } }
-  async function grantAddon(userId: string) { setError(''); try { await api(`/v1/admin/users/${userId}/addon`, { method: 'POST', body: JSON.stringify({ minutes: grantMinutes }) }); await load(); } catch (err) { setError(err instanceof Error ? err.message : '操作失败'); } }
-  async function terminate(id: string) { setError(''); try { await api(`/v1/admin/realtime-sessions/${id}/terminate`, { method: 'POST' }); await load(); } catch (err) { setError(err instanceof Error ? err.message : '操作失败'); } }
-  return <PanelShell title={tr('管理后台')} onClose={onClose} wide><div className="admin-stat-grid"><div><small>{tr('进行中的会话')}</small><strong>{activeSessions}</strong></div><div><small>{tr('用量汇总')}</small><strong>{totals.reduce((sum, item) => sum + item.seconds, 0) ? formatDuration(totals.reduce((sum, item) => sum + item.seconds, 0)) : tr('暂无用量。')}</strong></div></div>{totals.map((item) => <p className="panel-description" key={`${item.kind}-${item.source}`}>{item.kind === 'summary' ? tr('平台纪要') : tr('实时翻译')} · {item.source === 'addon' ? tr('加时包') : tr('套餐分钟')} · {formatDuration(item.seconds)}</p>)}<div className="term-form"><label>{tr('搜用户')}<input value={query} onChange={(event) => setQuery(event.target.value)} /></label><button className="secondary-button" onClick={() => void load()}>{tr('搜用户')}</button></div><div className="term-form"><label>{tr('套餐')}<select value={grantPlan} onChange={(event) => setGrantPlan(event.target.value)}><option value="plus">Plus</option><option value="pro">Pro</option><option value="ultra">Ultra</option><option value="free">Free</option></select></label><label>{tr('月数')}<input type="number" min="1" max="120" value={grantMonths} onChange={(event) => setGrantMonths(Math.min(120, Math.max(1, Number(event.target.value) || 1)))} /></label><label>{tr('加时包分钟')}<input type="number" min="1" value={grantMinutes} onChange={(event) => setGrantMinutes(Math.max(1, Number(event.target.value) || 1))} /></label></div><div className="panel-list">{users.map((user) => <div className="panel-list-item" key={user.id}><span><strong>{user.email}</strong><small>{(user.plan ?? 'free').toUpperCase()} · {tr('加时包')} {formatDuration(user.addonSeconds ?? 0)}</small></span><span className="list-item-actions"><button className="secondary-button" onClick={() => void grant(user.id)}>{tr('开通')}</button><button className="secondary-button" onClick={() => void grantAddon(user.id)}>{tr('增加加时包')}</button></span></div>)}</div><div className="term-form"><label>{tr('套餐')}<select value={plan} onChange={(event) => setPlan(event.target.value)}><option value="plus">Plus</option><option value="pro">Pro</option><option value="ultra">Ultra</option></select></label><label>{tr('月数')}<input type="number" min="1" max="120" value={months} onChange={(event) => setMonths(Math.min(120, Math.max(1, Number(event.target.value) || 1)))} /></label><label>{tr('加时包分钟')}<input type="number" min="0" value={addonMinutes} onChange={(event) => setAddonMinutes(Math.max(0, Number(event.target.value) || 0))} /></label><label>{tr('可兑换次数')}<input type="number" min="1" max="10000" value={maxRedemptions} onChange={(event) => setMaxRedemptions(Math.min(10000, Math.max(1, Number(event.target.value) || 1)))} /></label><label>{tr('有效天数')}<input type="number" min="1" max="3650" value={expiresInDays} onChange={(event) => setExpiresInDays(event.target.value)} placeholder={tr('留空则不限')} /></label><label>{tr('生成数量')}<input type="number" min="1" max="100" value={count} onChange={(event) => setCount(Math.min(100, Math.max(1, Number(event.target.value) || 1)))} /></label><label>{tr('备注')}<input value={note} onChange={(event) => setNote(event.target.value)} /></label><button className="primary-button" onClick={() => void generate()} disabled={busy}>{busy ? tr('生成中…') : tr('生成激活码')}</button></div>{error && <div className="form-message" role="alert">{error}</div>}{codes.length > 0 && <div className="generated-codes"><div className="generated-codes-header"><span>已生成 {codes.length} 个</span><button className="link-button" onClick={() => void copyCodes()}>{tr('复制全部')}</button></div>{codes.map((code) => <code key={code}>{code}</code>)}</div>}<h3>{tr('激活码列表')}</h3><div className="panel-list">{savedCodes.map((code) => <div className="panel-list-item" key={code.id}><span><strong>{code.codePrefix}…</strong><small>{(code.plan ?? 'addon').toUpperCase()} · {code.months ?? 0} · {tr('兑换 {count} 次').replace('{count}', `${code.redemptionCount}/${code.maxRedemptions}`)}{code.expiresAt ? ` · ${tr('到期')} ${formatDate(code.expiresAt)}` : ''}{code.disabled ? ' · disabled' : ''}</small></span>{!code.disabled && <button className="danger-button" onClick={() => void disableCode(code.id)}>{tr('作废')}</button>}</div>)}</div><h3>{tr('进行中的会话')}</h3>{sessions.length === 0 && <p className="panel-description">{tr('没有进行中的会话。')}</p>}<div className="panel-list">{sessions.map((session) => <div className="panel-list-item" key={session.id}><span><strong>{session.email ?? session.id}</strong><small>{session.mode} · {session.status}</small></span><button className="danger-button" onClick={() => void terminate(session.id)}>{tr('终止')}</button></div>)}</div></PanelShell>;
-}
 
 const CAPTION_PAGE = 80;
 const NO_LATENCY: LatencyReadout = { recognition: null, translation: null };
+const SESSION_PATH = /^\/session\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/?$/i;
 type ActiveSession = { id: string; mode: 'one_way' | 'two_way'; status: string; title: string | null; languageA: string; languageB: string | null; targetLanguage: string | null };
+type SessionLink = ActiveSession & { endedAt: string | null; transcriptId: string | null };
+
+function sessionIdFromPath(path: string) {
+  return path.match(SESSION_PATH)?.[1] ?? null;
+}
 
 function App() {
   useLang();
   useViewportHeight();
+  const inviteCaptured = useRef(false);
+  if (!inviteCaptured.current) { inviteCaptured.current = true; captureInvite(); }
   const phone = useMediaQuery(PHONE_QUERY);
   const [authenticated, setAuthenticated] = useState(Boolean(getToken()) && !isTokenExpired());
   const [entitlement, setEntitlement] = useState<Entitlement | null>(null);
@@ -340,16 +57,27 @@ function App() {
   const [languageA, setLanguageA] = useState(() => localStorage.getItem('linguaflow_lang_a') || 'ru'); const [languageB, setLanguageB] = useState(() => localStorage.getItem('linguaflow_lang_b') || 'zh');
   const [glossaryId, setGlossaryId] = useState(() => localStorage.getItem('linguaflow_glossary') || ''); const [glossaryChoices, setGlossaryChoices] = useState<Glossary[]>([]);
   const [languages, setLanguages] = useState<Array<{ code: string; nativeName: string; englishName: string }>>([]);
-  const [audioSource, setAudioSource] = useState<AudioSource>('microphone'); const [recordAudio, setRecordAudio] = useState(() => localStorage.getItem('linguaflow_record_audio') !== '0'); const [dockOpen, setDockOpen] = useState(false); const [captionOpen, setCaptionOpen] = useState(false); const [showJump, setShowJump] = useState(false); const stageRef = useRef<HTMLDivElement>(null); const followLatest = useRef(true); const scrolling = useRef(false); const captionFold = useRef(createCaptionFold()); const captionLimitRef = useRef(CAPTION_PAGE); const windowEndRef = useRef(0); const scrollAnchor = useRef(0);
-  const [sessionStatus, setSessionStatus] = useState<SessionStatus>('idle'); const [serviceStatus, setServiceStatus] = useState<ServiceStatus>('checking'); const [segments, setSegments] = useState<Segment[]>([]); const [error, setError] = useState('');
+  const [audioSource, setAudioSource] = useState<AudioSource>('microphone'); const [recordAudio, setRecordAudio] = useState(() => localStorage.getItem('linguaflow_record_audio') !== '0'); const [voiceBoost, setVoiceBoost] = useState(() => localStorage.getItem('linguaflow_voice_boost') === '1'); const voiceBoostOn = useRef(voiceBoost); const [booster] = useState(() => new VoiceBoost()); const [dockOpen, setDockOpen] = useState(false); const [captionOpen, setCaptionOpen] = useState(false); const [showJump, setShowJump] = useState(false); const stageRef = useRef<HTMLDivElement>(null); const followLatest = useRef(true); const scrolling = useRef(false); const captionFold = useRef(createCaptionFold()); const captionLimitRef = useRef(CAPTION_PAGE); const windowEndRef = useRef(0); const scrollAnchor = useRef(0);
+  const [sessionStatus, setSessionStatus] = useState<SessionStatus>('idle'); const [serviceStatus, setServiceStatus] = useState<ServiceStatus>('checking'); const [segments, setSegments] = useState<Segment[]>([]); const [error, setError] = useState(''); const [recovery, setRecovery] = useState<null | 'quota' | 'device'>(null);
+  function showProblem(message: string, next: null | 'quota' | 'device' = null) { setRecovery(message ? next : null); setError(message); }
   const [remainingSeconds, setRemainingSeconds] = useState<number | null>(null); const [endedTranscriptId, setEndedTranscriptId] = useState<string | null>(null); const [focusTranscriptId, setFocusTranscriptId] = useState<string | null>(null);
   const [recordAck, setRecordAck] = useState(() => localStorage.getItem('linguaflow_record_ack') === '1');
-  const [conflictSession, setConflictSession] = useState<ActiveSession | null>(null); const [captionLimit, setCaptionLimit] = useState(CAPTION_PAGE); const [windowEnd, setWindowEnd] = useState(0); const [paused, setPaused] = useState(false); const pausedRef = useRef(false);
+  const [conflictSession, setConflictSession] = useState<ActiveSession | null>(null); const [routeEnded, setRouteEnded] = useState<{ id: string; transcriptId: string | null } | null>(null); const [captionLimit, setCaptionLimit] = useState(CAPTION_PAGE); const [windowEnd, setWindowEnd] = useState(0); const [paused, setPaused] = useState(false); const pausedRef = useRef(false);
+  const [path, setPath] = useState(() => window.location.pathname);
+  useEffect(() => {
+    const sync = () => setPath(window.location.pathname);
+    window.addEventListener('popstate', sync);
+    return () => window.removeEventListener('popstate', sync);
+  }, []);
+  function replacePath(next: string) {
+    if (window.location.pathname !== next) window.history.replaceState({ linguaflow: next }, '', next);
+    setPath(next);
+  }
   const [captionSize, setCaptionSize] = useState(() => localStorage.getItem('linguaflow_caption_size') || 'md'); const [glossaryDropped, setGlossaryDropped] = useState(0); const [glossaryDroppedTerms, setGlossaryDroppedTerms] = useState<string[]>([]); const [glossaryUsed, setGlossaryUsed] = useState(0); const [glossaryAligned, setGlossaryAligned] = useState(true); const [fullscreen, setFullscreen] = useState(false);
   const [sessionTitle, setSessionTitle] = useState(''); const [closePrompt, setClosePrompt] = useState(false); const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
   const [showGuide, setShowGuide] = useState(() => localStorage.getItem('linguaflow_seen_guide') !== '1'); const [captionView, setCaptionView] = useState<CaptionView>(() => { const saved = localStorage.getItem('linguaflow_caption_view'); return saved === 'translation' || saved === 'source' ? saved : 'both'; });
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({}); const [namingSpeaker, setNamingSpeaker] = useState<string | null>(null); const [speakerDraft, setSpeakerDraft] = useState('');
-  const [mics, setMics] = useState<Array<{ id: string; label: string }>>([]); const [micId, setMicId] = useState(() => localStorage.getItem('linguaflow_mic') || ''); const [liveNotice, setLiveNotice] = useState('');
+  const [mics, setMics] = useState<Array<{ id: string; label: string }>>([]); const [micId, setMicId] = useState(() => localStorage.getItem('linguaflow_mic') || ''); const [liveNotice, setLiveNotice] = useState(''); const [savedNote, setSavedNote] = useState('');
   const [audioStalled, setAudioStalled] = useState(false); const sessionReady = useRef(false);
   const acceptAudio = useRef(false); const userStop = useRef(false); const recoverLock = useRef(false); const readyWait = useRef<((ok: boolean) => void) | null>(null); const speakerNamesRef = useRef<Record<string, string>>({}); const closeTitleRef = useRef('');
   const limitSeconds = useRef<number | null>(null); const readyAt = useRef<number | null>(null); const savedTranscriptId = useRef<string | null>(null);
@@ -363,6 +91,7 @@ function App() {
   useEffect(() => { authToken.current = getToken(); }, [authenticated]);
   useEffect(() => { localStorage.setItem('linguaflow_lang_a', languageA); localStorage.setItem('linguaflow_lang_b', languageB); }, [languageA, languageB]);
   useEffect(() => { localStorage.setItem('linguaflow_record_audio', recordAudio ? '1' : '0'); }, [recordAudio]);
+  useEffect(() => { voiceBoostOn.current = voiceBoost; localStorage.setItem('linguaflow_voice_boost', voiceBoost ? '1' : '0'); }, [voiceBoost]);
   useEffect(() => { localStorage.setItem('linguaflow_glossary', glossaryId); }, [glossaryId]);
   useEffect(() => { localStorage.setItem('linguaflow_caption_size', captionSize); }, [captionSize]);
   useEffect(() => { localStorage.setItem('linguaflow_caption_view', captionView); }, [captionView]);
@@ -407,6 +136,33 @@ function App() {
   useEffect(() => { const onChange = () => setFullscreen(Boolean(document.fullscreenElement)); document.addEventListener('fullscreenchange', onChange); return () => document.removeEventListener('fullscreenchange', onChange); }, []);
   useEffect(() => { if (!authenticated) return; let alive = true; api<{ session: ActiveSession | null }>('/v1/realtime/sessions/active').then((result) => { if (alive && result.session && statusRef.current === 'idle') setConflictSession(result.session); }).catch(() => undefined); return () => { alive = false; }; }, [authenticated]);
   useEffect(() => {
+    const id = sessionIdFromPath(path);
+    if (!id) { setRouteEnded(null); return; }
+    if (!authenticated || statusRef.current !== 'idle' || sessionId.current) return;
+    let alive = true;
+    api<{ session: SessionLink }>(`/v1/realtime/sessions/${id}`).then((result) => {
+      if (!alive || statusRef.current !== 'idle' || sessionId.current) return;
+      const session = result.session;
+      if (session.endedAt) {
+        setRouteEnded({ id: session.id, transcriptId: session.transcriptId });
+        setConflictSession((current) => current?.id === session.id ? null : current);
+        return;
+      }
+      setRouteEnded(null);
+      const active: ActiveSession = { id: session.id, mode: session.mode === 'two_way' ? 'two_way' : 'one_way', status: session.status, title: session.title, languageA: session.languageA, languageB: session.languageB, targetLanguage: session.targetLanguage };
+      setConflictSession(active);
+      applyActiveSession(active);
+    }).catch((err) => {
+      if (!alive || statusRef.current !== 'idle') return;
+      if (err instanceof ApiError && err.status === 404) {
+        setRouteEnded(null);
+        showProblem(tr('找不到这场翻译。'));
+        replacePath('/');
+      }
+    });
+    return () => { alive = false; };
+  }, [authenticated, path]);
+  useEffect(() => {
     if (!authenticated || !glossaryId) { setGlossaryDropped(0); setGlossaryDroppedTerms([]); setGlossaryUsed(0); setGlossaryAligned(true); return; }
     const params = new URLSearchParams({ type: mode, languageA });
     if (mode === 'one_way') params.set('targetLanguage', languageB); else params.set('languageB', languageB);
@@ -415,9 +171,9 @@ function App() {
     return () => { alive = false; };
   }, [authenticated, glossaryId, mode, languageA, languageB]);
   useEffect(() => {
-    if (sessionStatus !== 'running') return;
+    if (!shouldRefreshAccessToken(sessionStatus === 'running', true)) return;
     const timer = window.setInterval(() => {
-      if (!tokenExpiresWithin(2 * 60 * 60 * 1000)) return;
+      if (!shouldRefreshAccessToken(true, tokenExpiresWithin(2 * 60 * 60 * 1000))) return;
       void api<{ token: string }>('/v1/auth/refresh', { method: 'POST' }).then((result) => setToken(result.token)).catch(() => undefined);
     }, 60_000);
     return () => window.clearInterval(timer);
@@ -547,9 +303,12 @@ function App() {
     }
   }
   function sendChunk(chunk: ArrayBuffer, capturedAt = performance.now()) {
+    /* Keep the filter and the noise floor in step with the mic while paused.
+       Dropping the chunk first left a stale filter, which thumped on resume. */
+    const pcm = booster.process(chunk, voiceBoostOn.current);
     if (pausedRef.current) return;
-    const stamped = stampChunk(chunk.byteLength, capturedAt);
-    audioQueue.current.push({ pcm: chunk, ...stamped });
+    const stamped = stampChunk(pcm.byteLength, capturedAt);
+    audioQueue.current.push({ pcm, ...stamped });
     trimQueuedAudio(audioQueue.current);
     if (acceptAudio.current) pumpAudio(socket.current);
   }
@@ -569,7 +328,7 @@ function App() {
           if (keepalive.current !== null) window.clearInterval(keepalive.current);
           keepalive.current = window.setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'keepalive' })); }, 10_000);
           if (startupTimer.current !== null) window.clearTimeout(startupTimer.current); startupTimer.current = null;
-          setError('');
+          showProblem('');
           updateSessionStatus('running');
           readyWait.current?.(true);
           readyWait.current = null;
@@ -585,11 +344,19 @@ function App() {
           if (data.tokens.length) consumeTokens(data.tokens);
           observeTranscript(latencyClock.current, data, performance.now());
         }
-        if (data.type === 'error') { setError(data.code === 'quota_exhausted' ? tr('额度已用完，本次会话已结束。') : data.code === 'session_limit_reached' ? tr('单次时长已到，本次会话已结束。') : data.message ?? data.code); if (data.code === 'quota_exhausted' || data.code === 'session_limit_reached') void stop(); else { releaseUpstream(); void stop({ alreadyFinished: true }); } }
-        if (data.type === 'finished') { if (data.reason === 'expired') setError(tr('长时间没有活动，这场翻译已结束。')); if (data.transcriptId) savedTranscriptId.current = data.transcriptId; releaseUpstream(); void stop({ alreadyFinished: true }); }
-      } catch { setError(tr('收到无法识别的实时消息。')); releaseUpstream(); void stop({ alreadyFinished: true }); }
+        if (data.type === 'error') { showProblem(data.code === 'quota_exhausted' ? tr('额度已用完，本次会话已结束。') : data.code === 'session_limit_reached' ? tr('单次时长已到，本次会话已结束。') : data.message ?? data.code, data.code === 'quota_exhausted' ? 'quota' : null); if (data.code === 'quota_exhausted' || data.code === 'session_limit_reached') void stop(); else { releaseUpstream(); void stop({ alreadyFinished: true }); } }
+        if (data.type === 'finished') {
+          const expired = data.reason === 'expired';
+          if (expired && data.transcriptId) setSavedNote(tr('长时间没有活动，这场翻译已结束。'));
+          else if (expired) showProblem(tr('长时间没有活动，这场翻译已结束。'));
+          else setSavedNote('');
+          if (data.transcriptId) savedTranscriptId.current = data.transcriptId;
+          releaseUpstream();
+          void stop({ alreadyFinished: true });
+        }
+      } catch { showProblem(tr('收到无法识别的实时消息。')); releaseUpstream(); void stop({ alreadyFinished: true }); }
     };
-    ws.onerror = () => { if (socket.current === ws && sessionReady.current) setError(tr('连接中断，正在恢复…')); };
+    ws.onerror = () => { if (socket.current === ws && sessionReady.current && !userStop.current) showProblem(tr('连接中断，正在恢复…')); };
     ws.onclose = (event) => {
       if (socket.current !== ws) return;
       readyWait.current?.(false);
@@ -599,7 +366,7 @@ function App() {
       /* Nothing to resume if the very first connection never got ready. Retrying
          it as a dropped session only hid the real cause behind "reconnecting". */
       if (!sessionReady.current && statusRef.current === 'connecting') {
-        setError(!navigator.onLine ? tr('手机没有联网，请检查网络后重试。') : event.code === 1008 ? tr('翻译服务拒绝了这次连接，请重新开始。') : tr('实时连接失败，请检查网络后重试。'));
+        showProblem(!navigator.onLine ? tr('手机没有联网，请检查网络后重试。') : event.code === 1008 ? tr('翻译服务拒绝了这次连接，请重新开始。') : tr('实时连接失败，请检查网络后重试。'));
         releaseUpstream();
         void stop({ alreadyFinished: true });
         return;
@@ -614,7 +381,7 @@ function App() {
     recoverLock.current = true;
     acceptAudio.current = false;
     updateSessionStatus('reconnecting');
-    setError(tr('连接中断，正在恢复…'));
+    showProblem(tr('连接中断，正在恢复…'));
     let restored = false;
     for (let attempt = 0; attempt < 3 && !userStop.current; attempt += 1) {
       try {
@@ -633,7 +400,7 @@ function App() {
     if (!restored && !userStop.current && statusRef.current !== 'idle' && statusRef.current !== 'stopping') {
       userStop.current = true;
       recoverLock.current = false;
-      setError(tr('无法恢复连接，会话已结束。'));
+      showProblem(tr('无法恢复连接，会话已结束。'));
       releaseUpstream();
       void stop({ alreadyFinished: true });
       return;
@@ -642,7 +409,8 @@ function App() {
   }
   async function ensureAudio(gen: number) {
     if (audio.current) return true;
-    const stream = await createPcmStream(sendChunk, audioSource, () => { if (generation.current === gen) { setError(tr('音频来源已结束，会话已停止。')); void stop(); } }, audioSource === 'microphone' ? micId || undefined : undefined, (stalled) => { if (generation.current === gen) setAudioStalled(stalled); });
+    booster.reset();
+    const stream = await createPcmStream(sendChunk, audioSource, () => { if (generation.current === gen) { showProblem(tr('音频来源已结束，会话已停止。')); void stop(); } }, audioSource === 'microphone' ? micId || undefined : undefined, (stalled) => { if (generation.current === gen) setAudioStalled(stalled); });
     if (generation.current !== gen) { await stream.stop(); return false; }
     audio.current = stream;
     void listAudioInputs().then(setMics).catch(() => undefined);
@@ -650,7 +418,7 @@ function App() {
   }
   async function start() {
     if (statusRef.current !== 'idle') return;
-    if (sameLanguage) { setError(tr('源语言和目标语言不能相同。')); return; }
+    if (sameLanguage) { showProblem(tr('源语言和目标语言不能相同。')); return; }
     const id = ++generation.current;
     userStop.current = false;
     acceptAudio.current = false;
@@ -658,12 +426,12 @@ function App() {
     setAudioStalled(false);
     speakerNamesRef.current = {};
     setSpeakerNames({}); setNamingSpeaker(null); setLiveNotice(''); setClosePrompt(false); closeTitleRef.current = sessionTitle.trim().slice(0, 120);
-    setError(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; latencyClock.current = createLatencyClock(); setLatency(NO_LATENCY); savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null;
+    showProblem(''); setSavedNote(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; latencyClock.current = createLatencyClock(); setLatency(NO_LATENCY); savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null;
     updateSessionStatus('opening');
     try {
       if (!await ensureAudio(id)) return;
       updateSessionStatus('connecting');
-      startupTimer.current = window.setTimeout(() => { if (generation.current === id && (statusRef.current === 'connecting' || statusRef.current === 'opening')) { setError(tr('连接超时，请重试。')); void stop(); } }, 15_000);
+      startupTimer.current = window.setTimeout(() => { if (generation.current === id && (statusRef.current === 'connecting' || statusRef.current === 'opening')) { showProblem(tr('连接超时，请重试。')); void stop(); } }, 15_000);
       const glossary = glossaryId ? { glossaryId } : {};
       const named = sessionTitle.trim().slice(0, 120);
       const title = named ? { title: named } : {};
@@ -671,15 +439,19 @@ function App() {
       if (generation.current !== id) { setLiveSessionId(null); void api(`/v1/realtime/sessions/${session.sessionId}`, { method: 'DELETE', headers: authToken.current ? { authorization: `Bearer ${authToken.current}` } : undefined }).catch(() => undefined); return; }
       sessionId.current = session.sessionId;
       setLiveSessionId(session.sessionId);
+      setRouteEnded(null);
+      replacePath(`/session/${session.sessionId}`);
       bindSocket(openSocket(session.websocketUrl, session.websocketProtocols));
     } catch (err) {
       if (generation.current !== id) return;
       const cause = err as DOMException;
-      if (err instanceof ApiError && err.code === 'session_conflict') { setError(tr('上一场翻译还在占用额度。')); const fallbackId = err.sessionId ?? null; if (fallbackId) setConflictSession({ id: fallbackId, mode, status: 'active', title: null, languageA: '', languageB: null, targetLanguage: null }); void api<{ session: ActiveSession | null }>('/v1/realtime/sessions/active').then((result) => { if (statusRef.current !== 'idle' || sessionId.current) return; if (result.session) setConflictSession(result.session); }).catch(() => undefined); }
-      else if (err instanceof ApiError && err.code === 'quota_exhausted') setError(tr('额度已用完，无法开始新的翻译。'));
-      else if (cause.name === 'NotAllowedError') setError(tr('音频权限被拒绝，请在浏览器中允许访问后重试。'));
-      else if (cause.name === 'NotFoundError' || cause.name === 'OverconstrainedError') { setMicId(''); setError(tr('当前设备打不开所选麦克风，请改用系统默认麦克风后重试。')); }
-      else setError(err instanceof Error && err.message ? tr(err.message) : tr('无法开始翻译'));
+      if (err instanceof ApiError && err.code === 'session_conflict') { showProblem(tr('上一场翻译还在占用额度。')); const fallbackId = err.sessionId ?? null; if (fallbackId) setConflictSession({ id: fallbackId, mode, status: 'active', title: null, languageA: '', languageB: null, targetLanguage: null }); void api<{ session: ActiveSession | null }>('/v1/realtime/sessions/active').then((result) => { if (statusRef.current !== 'idle' || sessionId.current) return; if (result.session) setConflictSession(result.session); }).catch(() => undefined); }
+      else if (err instanceof ApiError && err.code === 'quota_exhausted') showProblem(tr('额度已用完，无法开始新的翻译。'), 'quota');
+      else if (err instanceof ApiError && err.code === 'free_device_blocked') showProblem(tr('这台设备已经使用过免费额度，新的免费账号不能再开始翻译。开通套餐后可以继续使用。'), 'device');
+      else if (err instanceof ApiError && err.code === 'device_required') showProblem(tr('无法识别这台设备，请刷新页面后再试。'));
+      else if (cause.name === 'NotAllowedError') showProblem(tr('音频权限被拒绝，请在浏览器中允许访问后重试。'));
+      else if (cause.name === 'NotFoundError' || cause.name === 'OverconstrainedError') { setMicId(''); showProblem(tr('当前设备打不开所选麦克风，请改用系统默认麦克风后重试。')); }
+      else showProblem(err instanceof Error && err.message ? tr(err.message) : tr('无法开始翻译'));
       void stop();
     }
   }
@@ -725,6 +497,7 @@ function App() {
     updateSessionStatus('idle');
     closeTitleRef.current = '';
     setLiveSessionId(null);
+    replacePath('/');
     if (saved) { setEndedTranscriptId(saved); setSessionTitle(''); }
   }
   function requestClose() {
@@ -742,7 +515,8 @@ function App() {
     const id = conflictSession?.id;
     if (!id) return;
     await api(`/v1/realtime/sessions/${id}`, { method: 'DELETE' }).catch(() => undefined);
-    setConflictSession(null); setError('');
+    setConflictSession(null); showProblem('');
+    if (sessionIdFromPath(window.location.pathname) === id) replacePath('/');
     if (thenStart) await start();
   }
   function applyActiveSession(session: ActiveSession) {
@@ -756,9 +530,10 @@ function App() {
   async function resumeConflict() {
     const pending = conflictSession;
     if (!pending || statusRef.current !== 'idle') return;
+    replacePath(`/session/${pending.id}`);
     userStop.current = false;
     acceptAudio.current = false;
-    setConflictSession(null); setError(''); setLiveNotice('');
+    setConflictSession(null); showProblem(''); setLiveNotice('');
     followLatest.current = true;
     const gen = ++generation.current;
     sessionId.current = pending.id;
@@ -781,7 +556,7 @@ function App() {
       if (!await ensureAudio(gen)) return;
       await recover();
     } catch (err) {
-      setError(err instanceof Error ? tr(err.message) : tr('无法恢复连接，会话已结束。'));
+      showProblem(err instanceof Error ? tr(err.message) : tr('无法恢复连接，会话已结束。'));
       void stop();
     }
   }
@@ -796,7 +571,7 @@ function App() {
   }
   async function copyLive() {
     try { await navigator.clipboard.writeText(liveText()); setLiveNotice(tr('已复制当前字幕。')); }
-    catch { setError(tr('当前浏览器不允许复制，请手动选择文本。')); }
+    catch { showProblem(tr('当前浏览器不允许复制，请手动选择文本。')); }
   }
   function exportLive() {
     const blob = new Blob([liveText()], { type: 'text/plain;charset=utf-8' });
@@ -824,14 +599,15 @@ function App() {
   const captionEnd = Math.min(windowEnd, segments.length);
   const hiddenCaptions = Math.max(0, captionEnd - captionLimit);
   const visibleCaptions = segments.slice(hiddenCaptions, captionEnd);
-  const path = window.location.pathname;
+  const routeSessionId = sessionIdFromPath(path);
+  const rejoin = Boolean(routeSessionId && conflictSession?.id === routeSessionId && sessionStatus === 'idle');
   if (path === '/privacy' || path === '/en/privacy') return <LegalPage kind="privacy" />;
   if (path === '/terms' || path === '/en/terms') return <LegalPage kind="terms" />;
   const shareToken = path.match(/^\/s\/([^/]+)\/?$/)?.[1];
   if (shareToken) return <SharePage token={decodeURIComponent(shareToken)} />;
   const liveToken = path.match(/^\/live\/([^/]+)\/?$/)?.[1];
   if (liveToken) return <LivePage token={decodeURIComponent(liveToken)} />;
-  if (!authenticated && path !== '/') return <MarketingPage />;
+  if (!authenticated && path !== '/' && !routeSessionId) return <MarketingPage />;
   if (!authenticated) return <AuthScreen onLogin={() => setAuthenticated(true)} />;
   const captionsVisible = segments.length > 0 || running || sessionStatus === 'reconnecting';
   const timeWarning = running && remainingSeconds !== null && remainingSeconds <= 60;
@@ -848,13 +624,14 @@ function App() {
   const notices: Array<Notice | null> = [
     closePrompt ? { id: 'close', node: <form className="close-title" onSubmit={(event) => { event.preventDefault(); confirmClose(); }}><label>{tr('这场翻译的名称')}<input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} autoFocus /></label><button className="primary-button" type="submit">{tr('保存并结束')}</button><button type="button" className="link-button" onClick={() => setClosePrompt(false)}>{tr('继续翻译')}</button></form> } : null,
     namingSpeaker ? { id: 'speaker', node: <form className="speaker-rename-form" onSubmit={(event) => { event.preventDefault(); renameLiveSpeaker(); }}><label>{tr('改名为')}<input value={speakerDraft} onChange={(event) => setSpeakerDraft(event.target.value)} aria-label={tr('说话人名称')} autoFocus /></label><button className="secondary-button" type="submit">{tr('保存')}</button><button type="button" className="secondary-button" onClick={() => setNamingSpeaker(null)}>{tr('取消')}</button></form> } : null,
-    error ? { id: 'error', node: <div className="error-banner" role="alert">{error}</div> } : null,
+    error ? { id: 'error', node: <div className={`error-banner${recovery ? ' has-actions' : ''}`} role="alert"><span>{error}</span>{recovery && <><button type="button" className="primary-button" onClick={() => setPanel('pricing')}>{tr('打开套餐与激活码')}</button><button type="button" className="link-button" onClick={() => setPanel('invite')}>{tr('邀请朋友')}</button></>}</div> } : null,
     audioStalled && sessionLive ? { id: 'stalled', node: <div className="error-banner time-warning-banner" role="status">{tr('收音被系统暂停了，点一下屏幕继续。')}</div> } : null,
     timeWarning ? { id: 'time', node: <div className="error-banner time-warning-banner" role="status">{tr('本次会话即将结束，剩余')} {formatRemain(remainingSeconds ?? 0)}</div> } : null,
+    routeEnded && routeEnded.id === routeSessionId && sessionStatus === 'idle' ? { id: 'route-ended', node: <div className="session-saved" role="status"><span>{tr('这场翻译已经结束，无法恢复。')}</span>{routeEnded.transcriptId && <button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(routeEnded.transcriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button>}<button type="button" className="link-button" onClick={() => replacePath('/')}>{tr('回到工作区')}</button></div> } : null,
     conflictSession && sessionStatus === 'idle' ? { id: 'conflict', node: <div className="record-notice" role="status"><p>{tr('上一场翻译还在占用额度。')}</p><button type="button" className="primary-button" onClick={() => void resumeConflict()}>{tr('恢复这场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(false)}>{tr('结束上一场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(true)}>{tr('结束上一场并开始')}</button></div> } : null,
-    endedTranscriptId && sessionStatus === 'idle' ? { id: 'saved', node: <div className="session-saved" role="status"><span>{tr('本次记录已保存。')}</span><button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(endedTranscriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button><button type="button" className="link-button" onClick={() => setEndedTranscriptId(null)}>{tr('关闭')}</button></div> } : null,
+    endedTranscriptId && sessionStatus === 'idle' ? { id: 'saved', node: <div className="session-saved" role="status"><span>{savedNote || tr('本次记录已保存。')}</span><button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(endedTranscriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button><button type="button" className="link-button" onClick={() => { setEndedTranscriptId(null); setSavedNote(''); }}>{tr('关闭')}</button></div> } : null,
     !recordAck && recordAudio && sessionStatus === 'idle' ? { id: 'record-ack', node: <div className="record-notice" role="status"><p>{tr('录音默认开启。本次语音会保存到你的字幕库，只有你可以回放和删除。如果不需要保存，请先关闭「保存本次语音」。')}</p><button type="button" className="secondary-button" onClick={() => { localStorage.setItem('linguaflow_record_ack', '1'); setRecordAck(true); }}>{tr('知道了')}</button></div> } : null,
-    showGuide && sessionStatus === 'idle' && !conflictSession ? { id: 'guide', node: <FirstRun pair={currentLabel} plan={entitlement?.plan.toUpperCase() ?? 'FREE'} minutesLeft={entitlement ? (entitlement.remainingSeconds >= Number.MAX_SAFE_INTEGER / 2 ? tr('无限') : `${Math.ceil(entitlement.remainingSeconds / 60)} ${tr('分钟')}`) : '…'} onOpen={() => { if (!phone) setDockOpen(true); }} onDone={() => setShowGuide(false)} /> } : null,
+    showGuide && sessionStatus === 'idle' && !conflictSession && !routeEnded ? { id: 'guide', node: <FirstRun pair={currentLabel} plan={entitlement?.plan.toUpperCase() ?? 'FREE'} minutesLeft={entitlement ? (usableSeconds(entitlement) >= Number.MAX_SAFE_INTEGER / 2 ? tr('无限') : `${Math.ceil(usableSeconds(entitlement) / 60)} ${tr('分钟')}`) : '…'} onOpen={() => { if (!phone) setDockOpen(true); }} onDone={() => setShowGuide(false)} /> } : null,
     liveNotice ? { id: 'live-notice', node: <p className="live-notice" role="status">{liveNotice}</p> } : null
   ];
 
@@ -911,6 +688,7 @@ function App() {
         mics={mics}
         micId={micId}
         recordAudio={recordAudio}
+        voiceBoost={voiceBoost}
         sessionTitle={sessionTitle}
         liveSessionId={liveSessionId}
         captionView={captionView}
@@ -921,6 +699,7 @@ function App() {
         timeWarning={Boolean(timeWarning)}
         hasCaptions={segments.length > 0}
         planLabel={entitlement ? `${PLANS[entitlement.plan].label} ${tr('额度')}` : ''}
+        rejoin={rejoin}
         onDockOpen={(open) => { setDockOpen(open); if (open) setCaptionOpen(false); }}
         onCaptionOpen={(open) => { setCaptionOpen(open); if (open) setDockOpen(false); }}
         onMode={setMode}
@@ -930,6 +709,7 @@ function App() {
         onAudioSource={setAudioSource}
         onMic={setMicId}
         onRecordAudio={setRecordAudio}
+        onVoiceBoost={(value) => { voiceBoostOn.current = value; setVoiceBoost(value); }}
         onSessionTitle={setSessionTitle}
         onCaptionView={setCaptionView}
         onCaptionSize={setCaptionSize}
@@ -942,16 +722,21 @@ function App() {
           /* Opening the mic on a phone shows a permission sheet. The tap that
              dismisses it lands on this same button and used to cancel the session
              before any audio was sent. */
-          if (status === 'idle') { void start(); return; }
+          if (status === 'idle') {
+            if (routeSessionId && conflictSession?.id === routeSessionId) { void resumeConflict(); return; }
+            void start();
+            return;
+          }
           if (status === 'running' || status === 'reconnecting') requestClose();
         }}
         onCopy={() => void copyLive()}
         onExport={exportLive}
       />
     </main>
-    {panel === 'transcripts' && <TranscriptPanel focusId={focusTranscriptId} onClose={() => { setPanel('none'); setFocusTranscriptId(null); }} />}
+    {panel === 'transcripts' && <TranscriptPanel focusId={focusTranscriptId} onOpenAccount={() => setPanel('account')} onClose={() => { setPanel('none'); setFocusTranscriptId(null); }} />}
     {panel === 'glossary' && <GlossaryPanel languageA={languageA} languageB={languageB} activeId={glossaryId} onActive={setGlossaryId} onList={setGlossaryChoices} onClose={() => setPanel('none')} />}
-    {panel === 'pricing' && <PricingPanel entitlement={entitlement} onRefresh={() => api<Entitlement>('/v1/me/entitlement').then(setEntitlement)} onClose={() => setPanel('none')} />}
+    {panel === 'pricing' && <PricingPanel entitlement={entitlement} onRefresh={() => api<Entitlement>('/v1/me/entitlement').then(setEntitlement)} onOpenInvite={() => setPanel('invite')} onClose={() => setPanel('none')} />}
+    {panel === 'invite' && <InvitePanel onClose={() => setPanel('none')} />}
     {panel === 'admin' && <AdminPanel onClose={() => setPanel('none')} />}
     {panel === 'account' && <AccountPanel email={profile?.email ?? ''} displayName={profile?.displayName ?? ''} onProfile={() => void reloadProfile()} onClose={() => setPanel('none')} />}
   </div>;

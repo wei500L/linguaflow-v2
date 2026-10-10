@@ -1,9 +1,12 @@
 import crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, isNull, sql as query } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, or, sql as query } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index.js';
-import { activationCodes, adminAudit, entitlements, realtimeSessions, usageLedger, users } from '../db/schema.js';
+import { activationCodes, adminAudit, deviceClaims, entitlements, realtimeSessions, usageLedger, userDevices, users } from '../db/schema.js';
+import { claimKeys, fingerprintKey } from '../lib/device.js';
+import { blockFingerprint, releaseFingerprint } from '../lib/device-store.js';
+import { approveReferral, listAdminReferrals, rejectReferral } from '../lib/referral.js';
 import { closeActiveSession } from '../realtime/proxy.js';
 
 const hashCode = (code: string) => crypto.createHash('sha256').update(code).digest('hex');
@@ -21,7 +24,7 @@ export async function adminRoutes(app: FastifyInstance) {
   app.get('/v1/admin/users', async (request) => {
     const { q } = request.query as { q?: string };
     const filter = q ? query`${users.email} ILIKE ${'%' + q + '%'}` : undefined;
-    return db.select({
+    const rows = await db.select({
       id: users.id,
       email: users.email,
       displayName: users.displayName,
@@ -32,6 +35,115 @@ export async function adminRoutes(app: FastifyInstance) {
       usedSecondsThisPeriod: entitlements.usedSecondsThisPeriod,
       planExpiresAt: entitlements.planExpiresAt
     }).from(users).leftJoin(entitlements, eq(users.id, entitlements.userId)).where(filter).orderBy(desc(users.createdAt)).limit(50);
+    if (!rows.length) return [];
+    const devices = await db.select({ userId: userDevices.userId, fingerprintHash: userDevices.fingerprintHash, deviceId: userDevices.deviceId }).from(userDevices).where(inArray(userDevices.userId, rows.map((row) => row.id)));
+    const keys = [...new Set(devices.flatMap((device) => claimKeys(device.fingerprintHash, device.deviceId)))];
+    const active = keys.length ? await db.select({ key: deviceClaims.key, claimedBy: deviceClaims.claimedBy }).from(deviceClaims).where(and(inArray(deviceClaims.key, keys), isNull(deviceClaims.releasedAt))) : [];
+    const owners = new Map(active.map((claim) => [claim.key, claim.claimedBy]));
+    return rows.map((row) => ({
+      ...row,
+      freeBlocked: devices.some((device) => device.userId === row.id && claimKeys(device.fingerprintHash, device.deviceId).some((key) => {
+        const owner = owners.get(key);
+        return Boolean(owner && owner !== row.id);
+      }))
+    }));
+  });
+
+  app.get('/v1/admin/free-devices', async (request) => {
+    const { q } = request.query as { q?: string };
+    const term = q?.trim();
+    let hashes: string[] | undefined;
+    if (term) {
+      const like = `%${term}%`;
+      const linked = await db.select({ hash: userDevices.fingerprintHash }).from(userDevices).leftJoin(users, eq(userDevices.userId, users.id)).where(or(query`${users.email} ILIKE ${like}`, query`${userDevices.lastIp} ILIKE ${like}`, query`${userDevices.userAgent} ILIKE ${like}`)).limit(100);
+      const owned = await db.select({ key: deviceClaims.key }).from(deviceClaims).leftJoin(users, eq(deviceClaims.claimedBy, users.id)).where(and(query`${deviceClaims.key} LIKE 'fp:%'`, query`${users.email} ILIKE ${like}`)).limit(100);
+      hashes = [...new Set([...linked.map((row) => row.hash), ...owned.map((row) => row.key.slice(3))])];
+      if (!hashes.length) return [];
+    }
+    const claims = await db.select({
+      key: deviceClaims.key,
+      claimedBy: deviceClaims.claimedBy,
+      claimedAt: deviceClaims.claimedAt,
+      releasedAt: deviceClaims.releasedAt,
+      ownerEmail: users.email
+    }).from(deviceClaims).leftJoin(users, eq(deviceClaims.claimedBy, users.id)).where(hashes ? and(query`${deviceClaims.key} LIKE 'fp:%'`, inArray(deviceClaims.key, hashes.map((hash) => fingerprintKey(hash)))) : query`${deviceClaims.key} LIKE 'fp:%'`).orderBy(desc(deviceClaims.claimedAt)).limit(50);
+    if (!claims.length) return [];
+    const links = await db.select({
+      fingerprintHash: userDevices.fingerprintHash,
+      userId: users.id,
+      email: users.email,
+      plan: entitlements.plan,
+      usedSecondsThisPeriod: entitlements.usedSecondsThisPeriod,
+      lastIp: userDevices.lastIp,
+      userAgent: userDevices.userAgent,
+      lastSeenAt: userDevices.lastSeenAt
+    }).from(userDevices).leftJoin(users, eq(userDevices.userId, users.id)).leftJoin(entitlements, eq(users.id, entitlements.userId)).where(inArray(userDevices.fingerprintHash, claims.map((claim) => claim.key.slice(3))));
+    return claims.map((claim) => {
+      const fingerprintHash = claim.key.slice(3);
+      const accounts = new Map<string, { userId: string; email: string; plan: string | null; usedSecondsThisPeriod: number | null }>();
+      let lastIp: string | null = null;
+      let userAgent: string | null = null;
+      let seenAt = 0;
+      for (const link of links) {
+        if (link.fingerprintHash !== fingerprintHash) continue;
+        const at = link.lastSeenAt?.getTime() ?? 0;
+        if (at >= seenAt) { seenAt = at; lastIp = link.lastIp; userAgent = link.userAgent; }
+        if (!link.userId || !link.email || accounts.has(link.userId)) continue;
+        accounts.set(link.userId, { userId: link.userId, email: link.email, plan: link.plan, usedSecondsThisPeriod: link.usedSecondsThisPeriod });
+      }
+      return { fingerprintHash, ownerUserId: claim.claimedBy, ownerEmail: claim.ownerEmail, claimedAt: claim.claimedAt.toISOString(), releasedAt: claim.releasedAt?.toISOString() ?? null, lastIp, userAgent, accounts: [...accounts.values()] };
+    });
+  });
+
+  app.post('/v1/admin/free-devices/:hash/release', async (request, reply) => {
+    const adminId = (request.user as { sub: string }).sub;
+    const hash = (request.params as { hash: string }).hash;
+    if (!/^[a-f0-9]{64}$/.test(hash)) return reply.code(400).send({ message: 'Invalid fingerprint' });
+    const [claim] = await db.select().from(deviceClaims).where(eq(deviceClaims.key, fingerprintKey(hash)));
+    if (!claim) return reply.code(404).send({ message: '找不到这个设备指纹。' });
+    const [owner] = await db.select({ id: users.id }).from(users).where(eq(users.id, claim.claimedBy));
+    await releaseFingerprint(hash);
+    await db.insert(adminAudit).values({ adminId, action: 'free_device_released', targetUserId: owner?.id, payloadJson: { fingerprintHash: hash } });
+    return { released: true };
+  });
+
+  app.post('/v1/admin/free-devices/:hash/block', async (request, reply) => {
+    const adminId = (request.user as { sub: string }).sub;
+    const hash = (request.params as { hash: string }).hash;
+    if (!/^[a-f0-9]{64}$/.test(hash)) return reply.code(400).send({ message: 'Invalid fingerprint' });
+    const [claim] = await db.select().from(deviceClaims).where(eq(deviceClaims.key, fingerprintKey(hash)));
+    if (!claim) return reply.code(404).send({ message: '找不到这个设备指纹。' });
+    const [owner] = await db.select({ id: users.id }).from(users).where(eq(users.id, claim.claimedBy));
+    await blockFingerprint(hash, claim.claimedBy);
+    await db.insert(adminAudit).values({ adminId, action: 'free_device_blocked', targetUserId: owner?.id, payloadJson: { fingerprintHash: hash } });
+    return { blocked: true };
+  });
+
+  app.get('/v1/admin/referrals', async (request) => {
+    const { status } = request.query as { status?: string };
+    if (status && !['pending', 'held', 'grant_due', 'qualified', 'rejected', 'expired'].includes(status)) return [];
+    return listAdminReferrals(status || undefined);
+  });
+
+  app.post('/v1/admin/referrals/:id/approve', async (request, reply) => {
+    const adminId = (request.user as { sub: string }).sub;
+    const { id } = request.params as { id: string };
+    if (!z.string().uuid().safeParse(id).success) return reply.code(400).send({ message: 'Invalid referral' });
+    const result = await approveReferral(id);
+    if (result.error === 'missing') return reply.code(404).send({ message: '找不到这条邀请。' });
+    if (result.error === 'not_held') return reply.code(409).send({ message: '这条邀请不在暂扣中。' });
+    await db.insert(adminAudit).values({ adminId, action: 'referral_approved', payloadJson: { referralId: id, status: result.status } });
+    return result;
+  });
+
+  app.post('/v1/admin/referrals/:id/reject', async (request, reply) => {
+    const adminId = (request.user as { sub: string }).sub;
+    const { id } = request.params as { id: string };
+    if (!z.string().uuid().safeParse(id).success) return reply.code(400).send({ message: 'Invalid referral' });
+    const result = await rejectReferral(id);
+    if (result.error === 'missing') return reply.code(404).send({ message: '找不到这条邀请。' });
+    await db.insert(adminAudit).values({ adminId, action: 'referral_rejected', payloadJson: { referralId: id } });
+    return result;
   });
 
   app.get('/v1/admin/activation-codes', async () => {

@@ -1,10 +1,12 @@
 import crypto from 'node:crypto';
 import { and, eq, inArray, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { summaryProviders, transcriptSegments, transcriptTasks, transcripts } from '../db/schema.js';
+import { realtimeSessions, summaryProviders, transcriptSegments, transcriptTasks, transcripts } from '../db/schema.js';
 import { formatClock } from '../export/meeting.js';
 import { config } from '../config.js';
+import { assertFreeTranslation, latestUserDevice } from '../lib/device-store.js';
 import { confirmSummaryUsage, refundSummaryUsage, reserveSummaryUsage } from '../lib/quota.js';
+import type { DeviceRef } from '../lib/device.js';
 import { decryptSecret } from '../lib/secrets.js';
 import { assertSummaryEndpoint, endpointAllowsMissingKey } from '../lib/ssrf.js';
 import { extractActionItems } from '@linguaflow/shared';
@@ -78,7 +80,15 @@ async function runSummary(userId: string, transcriptId: string, template: Summar
   }
 }
 
-export async function startSummary(userId: string, transcriptId: string, template: SummaryTemplate, outputLanguage: string, provider: 'platform' | 'byok' = 'byok') {
+async function recordedDevice(userId: string, sessionId: string | null) {
+  if (sessionId) {
+    const [session] = await db.select({ fingerprintHash: realtimeSessions.fingerprintHash, deviceId: realtimeSessions.deviceId }).from(realtimeSessions).where(eq(realtimeSessions.id, sessionId));
+    if (session?.fingerprintHash && session.deviceId) return { fingerprintHash: session.fingerprintHash, deviceId: session.deviceId };
+  }
+  return latestUserDevice(userId);
+}
+
+export async function startSummary(userId: string, transcriptId: string, template: SummaryTemplate, outputLanguage: string, provider: 'platform' | 'byok' = 'byok', device?: DeviceRef | null) {
   if (inflight.has(userId)) throw httpError(409, '已有一份纪要正在生成。');
   const controller = new AbortController();
   inflight.set(userId, { transcriptId, controller });
@@ -97,8 +107,10 @@ export async function startSummary(userId: string, transcriptId: string, templat
       apiKey = config.platformSummary.apiKey;
       model = config.platformSummary.model;
       await assertSummaryEndpoint(apiBase);
+      const seen = device === undefined ? await recordedDevice(userId, transcript.sessionId) : device;
+      await assertFreeTranslation(userId, seen);
       const charCount = entries.reduce((sum, entry) => sum + entry.original.length + entry.translation.length, 0);
-      await reserveSummaryUsage(userId, transcriptId, charCount);
+      await reserveSummaryUsage(userId, transcriptId, charCount, seen);
     } else {
       const [saved] = await db.select().from(summaryProviders).where(eq(summaryProviders.userId, userId));
       if (!saved) throw httpError(400, '请先在账户里保存你的总结模型。');

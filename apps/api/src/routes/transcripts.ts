@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { PLANS, summaryChargeSeconds, type Plan } from '@linguaflow/shared';
 import { db } from '../db/index.js';
 import { entitlements, transcriptFolders, transcriptSegments, transcriptTasks, transcripts } from '../db/schema.js';
+import { recordUserDevice } from '../lib/device-store.js';
 import { ensureEntitlement } from '../lib/quota.js';
 import { sendTranscriptFile } from '../export/download.js';
 import { buildMeetingMarkdown, safeDownloadName, type MeetingDocument } from '../export/meeting.js';
@@ -258,7 +259,8 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const userId = (request.user as { sub: string }).sub;
     const { id } = request.params as { id: string };
     const body = summaryRequest.parse(request.body ?? {});
-    return startSummary(userId, id, body.template, body.outputLanguage, body.provider);
+    const device = await recordUserDevice(userId, request);
+    return startSummary(userId, id, body.template, body.outputLanguage, body.provider, device);
   });
 
   app.post('/v1/transcripts/:id/summary/cancel', { preHandler: app.authenticate }, async (request) => {
@@ -280,9 +282,11 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const query = request.query as { playback?: string; download?: string; share?: string };
     let userId = '';
     if (query.share) {
-      const { openShare } = await import('../lib/shares.js');
+      const { openShare, sharePasswordMatches } = await import('../lib/shares.js');
       const share = await openShare(query.share);
       if (!share || share.transcriptId !== id || !share.includeAudio) return reply.code(401).send({ message: 'Authentication required' });
+      const supplied = typeof request.headers['x-share-password'] === 'string' ? request.headers['x-share-password'] : '';
+      if (!await sharePasswordMatches(share, supplied)) return reply.code(401).send({ code: 'share_password_required', message: '需要分享密码。' });
       const [owner] = await db.select({ userId: transcripts.userId }).from(transcripts).where(eq(transcripts.id, id));
       if (!owner) return reply.code(404).send({ message: '找不到录音。' });
       userId = owner.userId;

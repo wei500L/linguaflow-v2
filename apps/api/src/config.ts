@@ -37,3 +37,8 @@ export const config = {
     model: process.env.PLATFORM_SUMMARY_MODEL ?? ''
   }
 };
+
+export function assertProductionReady(env: { nodeEnv: string; smtp: { host?: string; user?: string; password?: string } } = config) {
+  if (env.nodeEnv !== 'production') return;
+  if (!env.smtp.host || !env.smtp.user || !env.smtp.password) throw new Error('SMTP is not configured');
+}

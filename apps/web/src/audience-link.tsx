@@ -4,7 +4,7 @@ import { api } from './lib/api';
 import { tr } from './lib/i18n';
 import { CloseIcon, QrIcon } from './icons';
 
-type Audience = { token: string; includeAudio: boolean; expiresAt: string | null };
+type Audience = { token: string | null; includeAudio: boolean; expiresAt: string | null };
 type SessionMode = 'one_way' | 'two_way';
 
 const classStarted = new Set<string>();
@@ -42,12 +42,12 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
   const generation = useRef(0);
   const publishRef = useRef<(include: boolean, expiresInHours: number | null, copy: boolean, automatic?: boolean) => Promise<void>>(async () => undefined);
 
-  async function publish(include: boolean, expiresInHours: number | null, copy: boolean, automatic = false) {
+  async function publish(include: boolean, expiresInHours: number | null, copy: boolean, automatic = false, reissue = false) {
     if (automatic && isRevoked(sessionId)) return;
     const ticket = ++generation.current;
     setBusy(true); setError(''); setNotice('');
     try {
-      const result = await api<{ audience: Audience }>(`/v1/realtime/sessions/${sessionId}/audience`, { method: 'POST', body: JSON.stringify({ includeAudio: include, expiresInHours }) });
+      const result = await api<{ audience: Audience }>(`/v1/realtime/sessions/${sessionId}/audience`, { method: 'POST', body: JSON.stringify({ includeAudio: include, expiresInHours, reissue }) });
       if (automatic && isRevoked(sessionId)) {
         await api(`/v1/realtime/sessions/${sessionId}/audience`, { method: 'DELETE' }).catch(() => undefined);
         if (ticket === generation.current) setAudience(null);
@@ -57,7 +57,7 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
       if (!automatic) {
         try { sessionStorage.removeItem(revokedKey(sessionId)); } catch { /* Storage can be blocked. */ }
       }
-      setAudience(result.audience);
+      setAudience((current) => ({ ...result.audience, token: result.audience.token || (reissue ? null : current?.token) || null }));
       if (!copy || !result.audience.token) return;
       const next = `${window.location.origin}/live/${result.audience.token}`;
       try { await navigator.clipboard.writeText(next); setNotice(tr('听众链接已复制。')); } catch { setNotice(''); }
@@ -89,8 +89,11 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
         return;
       }
       setViewerCount(result.viewerCount ?? 0);
-      setAudience(result.audience);
-      if (result.audience && syncedToken.current !== result.audience.token) {
+      setAudience((current) => {
+        if (!result.audience) return null;
+        return { ...result.audience, token: result.audience.token || current?.token || null };
+      });
+      if (result.audience?.token && syncedToken.current !== result.audience.token) {
         syncedToken.current = result.audience.token;
         setIncludeAudio(result.audience.includeAudio);
       }
@@ -110,7 +113,7 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
     return () => { alive = false; window.clearInterval(timer); };
   }, [sessionId, classroom]);
 
-  const link = audience ? `${window.location.origin}/live/${audience.token}` : '';
+  const link = audience?.token ? `${window.location.origin}/live/${audience.token}` : '';
   useEffect(() => {
     if (!link) { setQr(''); return; }
     let alive = true;
@@ -162,7 +165,7 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
       <div className={`audience-sheet${qrFullscreen ? ' is-fullscreen' : ''}`} role="dialog" aria-modal="true" aria-label={tr('听众链接')} ref={sheetRef}>
         <button type="button" className="audience-close" onClick={dismiss} aria-label={tr('关闭')}><CloseIcon size={20} /></button>
         <p className="audience-kicker">{classroom ? tr('给学生看') : tr('听众')}</p>
-        {audience ? <>
+        {audience?.token ? <>
           <p className="audience-count" role="status"><strong>{viewerCount}</strong><span>{tr('人正在看')}</span></p>
           {qr && <img className="audience-qr" src={qr} alt={tr('听众二维码')} width={360} height={360} />}
           <p className="audience-lead">{tr('扫码即可看字幕')}</p>
@@ -170,6 +173,10 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
             <button type="button" className="primary-button" onClick={() => void toggleQrFullscreen()}>{qrFullscreen ? tr('退出全屏') : tr('全屏二维码')}</button>
             <button type="button" className="audience-text" onClick={() => void copy()}>{tr('复制链接')}</button>
           </div>
+        </> : audience ? <>
+          <h2>{tr('重新签发并复制')}</h2>
+          <p className="audience-lead">{tr('再次展示会生成新的听众链接。旧链接会失效。')}</p>
+          <button type="button" className="primary-button" onClick={() => { if (!window.confirm(tr('重新签发会让已经打开的链接失效。'))) return; void publish(includeAudio, Number(hours) > 0 ? Number(hours) : 24 * 30, true, false, true); }} disabled={busy}>{busy ? tr('生成中…') : tr('重新签发并复制')}</button>
         </> : <>
           <h2>{classroom ? tr('生成一张学生能扫的二维码') : tr('听众链接')}</h2>
           <p className="audience-lead">{classroom ? tr('学生打开后只看字幕。你结束翻译后，这条链接会变成这场记录。') : tr('听众可以看到实时字幕。结束后，这条链接会变成这场记录的分享。')}</p>
@@ -178,8 +185,9 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
         <details className="audience-more">
           <summary>{tr('更多')}</summary>
           <label className="record-toggle"><input type="checkbox" checked={includeAudio} onChange={(event) => setIncludeAudio(event.target.checked)} /><span>{tr('结束后包含录音')}</span></label>
-          <label className="audio-source">{tr('分享有效期')}<select value={hours} onChange={(event) => setHours(event.target.value)}><option value="24">{tr('24 小时')}</option><option value="72">{tr('3 天')}</option><option value="168">{tr('7 天')}</option><option value="0">{tr('永不过期')}</option></select></label>
+          <label className="audio-source">{tr('分享有效期')}<select value={hours} onChange={(event) => setHours(event.target.value)}><option value="24">{tr('24 小时')}</option><option value="72">{tr('3 天')}</option><option value="168">{tr('7 天')}</option><option value="720">{tr('30 天')}</option></select></label>
           {audience && <button type="button" className="secondary-button" onClick={() => void create()} disabled={busy}>{tr('保存这些设置')}</button>}
+          {audience?.token && <button type="button" className="audience-text danger" onClick={() => { if (!window.confirm(tr('重新签发会让已经打开的链接失效。'))) return; void publish(includeAudio, Number(hours) > 0 ? Number(hours) : 24 * 30, true, false, true); }} disabled={busy}>{tr('重新签发')}</button>}
           {link && <input readOnly value={link} aria-label={tr('听众链接')} onFocus={(event) => event.currentTarget.select()} />}
           {audience?.expiresAt && <p>{tr('到期')} {new Date(audience.expiresAt).toLocaleString()}</p>}
           {audience && <button type="button" className="audience-text danger" onClick={() => void revoke()} disabled={busy}>{tr('撤销听众链接')}</button>}

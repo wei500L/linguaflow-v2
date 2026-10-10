@@ -5,11 +5,19 @@ import { z } from 'zod';
 import { db } from '../db/index.js';
 import { transcriptSegments, transcriptTasks, transcripts } from '../db/schema.js';
 import { sendTranscriptFile } from '../export/download.js';
-import { createShare, listShares, openShare, recordShareView, reissueShare, revokeShare } from '../lib/shares.js';
+import { signAudioPlayback } from '../lib/playback.js';
+import { createShare, listShares, openShare, recordShareView, reissueShare, resolveShareExpiry, revokeShare, sharePasswordMatches } from '../lib/shares.js';
 
 async function owned(userId: string, id: string) {
   const [transcript] = await db.select({ id: transcripts.id }).from(transcripts).where(and(eq(transcripts.id, id), eq(transcripts.userId, userId)));
   return transcript;
+}
+
+function shareAudioUrl(share: { includeAudio: boolean; passwordHash: string | null; scope: string }, transcript: { id: string; userId: string; audioRelPath: string | null; audioStatus: string | null }, token: string) {
+  if (share.scope === 'summary' || !share.includeAudio || !transcript.audioRelPath) return null;
+  if (transcript.audioStatus !== 'ready' && transcript.audioStatus !== 'encoding') return null;
+  if (share.passwordHash) return `/v1/transcripts/${transcript.id}/audio?playback=${encodeURIComponent(signAudioPlayback(transcript.id, transcript.userId))}`;
+  return `/v1/transcripts/${transcript.id}/audio?share=${encodeURIComponent(token)}`;
 }
 
 async function readShare(request: FastifyRequest, reply: FastifyReply) {
@@ -17,7 +25,7 @@ async function readShare(request: FastifyRequest, reply: FastifyReply) {
   const share = await openShare(token);
   if (!share) return null;
   const supplied = typeof request.headers['x-share-password'] === 'string' ? request.headers['x-share-password'] : '';
-  if (share.passwordHash && !await argon2.verify(share.passwordHash, supplied).catch(() => false)) {
+  if (!await sharePasswordMatches(share, supplied)) {
     reply.code(401).send({ code: 'share_password_required', message: '需要分享密码。' });
     return null;
   }
@@ -55,7 +63,7 @@ export async function shareRoutes(app: FastifyInstance) {
       scope: share.scope,
       viewCount: share.viewCount + 1,
       includeAudio: share.includeAudio && !summaryOnly,
-      audioUrl: !summaryOnly && share.includeAudio && transcript.audioRelPath && (transcript.audioStatus === 'ready' || transcript.audioStatus === 'encoding') ? `/v1/transcripts/${transcript.id}/audio?share=${encodeURIComponent((request.params as { token: string }).token)}` : null,
+      audioUrl: shareAudioUrl(share, transcript, (request.params as { token: string }).token),
       segments,
       tasks
     };
@@ -98,7 +106,7 @@ export async function shareRoutes(app: FastifyInstance) {
       password: z.string().max(80).optional(),
       scope: z.enum(['full', 'summary']).default('full')
     }).parse(request.body ?? {});
-    const expiresAt = body.expiresInHours ? new Date(Date.now() + body.expiresInHours * 60 * 60 * 1000) : null;
+    const expiresAt = resolveShareExpiry(body.expiresInHours);
     const passwordHash = body.password?.trim() ? await argon2.hash(body.password.trim()) : null;
     const share = await createShare(id, body.includeAudio, expiresAt, { passwordHash, scope: body.scope });
     return reply.code(201).send(share);

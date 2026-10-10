@@ -1,5 +1,5 @@
 import { sql } from 'drizzle-orm';
-import { boolean, integer, jsonb, pgTable, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
+import { boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
 const times = { createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull() };
 
@@ -9,9 +9,15 @@ export const users = pgTable('users', {
   passwordHash: text('password_hash'),
   displayName: text('display_name'),
   role: text('role').notNull().default('user'),
+  inviteCode: text('invite_code'),
+  tokenVersion: integer('token_version').notNull().default(0),
+  signupIp: text('signup_ip'),
   lastSeenAt: timestamp('last_seen_at', { withTimezone: true }),
   ...times
-}, (table) => [uniqueIndex('users_email_unique').on(table.email)]);
+}, (table) => [
+  uniqueIndex('users_email_unique').on(table.email),
+  uniqueIndex('users_invite_code_unique').on(table.inviteCode)
+]);
 
 export const authCodes = pgTable('auth_codes', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -84,6 +90,8 @@ export const realtimeSessions = pgTable('realtime_sessions', {
   audienceIncludeAudio: boolean('audience_include_audio').notNull().default(false),
   audienceExpiresAt: timestamp('audience_expires_at', { withTimezone: true }),
   audienceRevokedAt: timestamp('audience_revoked_at', { withTimezone: true }),
+  fingerprintHash: text('fingerprint_hash'),
+  deviceId: text('device_id'),
   ...times
 }, (table) => [uniqueIndex('realtime_audience_token_hash_unique').on(table.audienceTokenHash)]);
 
@@ -206,6 +214,65 @@ export const transcriptShares = pgTable('transcript_shares', {
   scope: text('scope').notNull().default('full'),
   ...times
 }, (table) => [uniqueIndex('transcript_share_hash_unique').on(table.tokenHash)]);
+
+/* user_id is cleared when the account is deleted so the fingerprint still
+   points at its device ids. Otherwise an admin release could not lift the dev: claim. */
+export const userDevices = pgTable('user_devices', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'set null' }),
+  fingerprintHash: text('fingerprint_hash').notNull(),
+  deviceId: text('device_id').notNull(),
+  lastIp: text('last_ip'),
+  userAgent: text('user_agent'),
+  firstSeenAt: timestamp('first_seen_at', { withTimezone: true }).defaultNow().notNull(),
+  lastSeenAt: timestamp('last_seen_at', { withTimezone: true }).defaultNow().notNull()
+}, (table) => [
+  uniqueIndex('user_devices_user_fp_device_unique').on(table.userId, table.fingerprintHash, table.deviceId),
+  index('user_devices_fingerprint_hash_idx').on(table.fingerprintHash),
+  index('user_devices_device_id_idx').on(table.deviceId)
+]);
+
+/* claimed_by is intentionally not a foreign key. Deleting the account that used
+   the free quota must leave the claim in place, or the next signup on the same
+   browser would get a fresh free allowance. */
+export const deviceClaims = pgTable('device_claims', {
+  key: text('key').primaryKey(),
+  claimedBy: uuid('claimed_by').notNull(),
+  claimedAt: timestamp('claimed_at', { withTimezone: true }).defaultNow().notNull(),
+  releasedAt: timestamp('released_at', { withTimezone: true })
+});
+
+/* No foreign keys. Deleting an account must leave the invite identity in
+   place, or the same inbox could register again and collect another reward. */
+export const referrals = pgTable('referrals', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  inviterId: uuid('inviter_id').notNull(),
+  inviteeId: uuid('invitee_id'),
+  inviteeEmailIdentity: text('invitee_email_identity').notNull(),
+  status: text('status').notNull(),
+  reason: text('reason'),
+  signupIp: text('signup_ip'),
+  fingerprintHash: text('fingerprint_hash'),
+  deviceId: text('device_id'),
+  weakDevice: boolean('weak_device').notNull().default(false),
+  qualifiedSessionId: uuid('qualified_session_id'),
+  inviteeGrantedSeconds: integer('invitee_granted_seconds').notNull().default(0),
+  inviterGrantedSeconds: integer('inviter_granted_seconds').notNull().default(0),
+  grantedAt: timestamp('granted_at', { withTimezone: true }),
+  expiresAt: timestamp('expires_at', { withTimezone: true }).notNull(),
+  ...times
+}, (table) => [
+  uniqueIndex('referrals_invitee_email_identity_unique').on(table.inviteeEmailIdentity),
+  uniqueIndex('referrals_invitee_id_unique').on(table.inviteeId).where(sql`${table.inviteeId} is not null`),
+  index('referrals_inviter_created_idx').on(table.inviterId, table.createdAt)
+]);
+
+export const authIpLimits = pgTable('auth_ip_limits', {
+  ip: text('ip').notNull(),
+  purpose: text('purpose').notNull(),
+  windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+  hits: integer('hits').notNull()
+}, (table) => [primaryKey({ columns: [table.ip, table.purpose] })]);
 
 export const adminAudit = pgTable('admin_audit', {
   id: uuid('id').primaryKey().defaultRandom(),
