@@ -1,3 +1,4 @@
+import type { AudioGap, PersistedSegment } from '@linguaflow/shared';
 import { sql } from 'drizzle-orm';
 import { boolean, index, integer, jsonb, pgTable, primaryKey, text, timestamp, uniqueIndex, uuid } from 'drizzle-orm/pg-core';
 
@@ -58,6 +59,21 @@ export const glossaries = pgTable('glossaries', {
   ...times
 });
 
+export const courses = pgTable('courses', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  languageA: text('language_a').notNull(),
+  languageB: text('language_b').notNull(),
+  mode: text('mode').notNull().default('one_way'),
+  glossaryId: uuid('glossary_id').references(() => glossaries.id, { onDelete: 'set null' }),
+  recordAudio: boolean('record_audio').notNull().default(true),
+  summaryTemplate: text('summary_template').notNull().default('classroom'),
+  titlePattern: text('title_pattern'),
+  ...times,
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull()
+});
+
 export const glossaryTerms = pgTable('glossary_terms', {
   id: uuid('id').primaryKey().defaultRandom(),
   glossaryId: uuid('glossary_id').notNull().references(() => glossaries.id, { onDelete: 'cascade' }),
@@ -92,6 +108,22 @@ export const realtimeSessions = pgTable('realtime_sessions', {
   audienceRevokedAt: timestamp('audience_revoked_at', { withTimezone: true }),
   fingerprintHash: text('fingerprint_hash'),
   deviceId: text('device_id'),
+  ownerInstanceId: text('owner_instance_id'),
+  ownerHeartbeatAt: timestamp('owner_heartbeat_at', { withTimezone: true }),
+  checkpointAt: timestamp('checkpoint_at', { withTimezone: true }),
+  checkpointSeq: integer('checkpoint_seq').notNull().default(0),
+  audioMs: integer('audio_ms').notNull().default(0),
+  activeUntil: timestamp('active_until', { withTimezone: true }),
+  saveStatus: text('save_status').notNull().default('pending'),
+  saveError: text('save_error'),
+  persistedTokenCount: integer('persisted_token_count').notNull().default(0),
+  segmentSnapshot: jsonb('segment_snapshot').$type<PersistedSegment[]>().notNull().default(sql`'[]'::jsonb`),
+  speakerNames: jsonb('speaker_names').$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
+  gaps: jsonb('gaps').$type<AudioGap[]>().notNull().default(sql`'[]'::jsonb`),
+  shareIntent: text('share_intent').notNull().default('personal'),
+  audienceKeepAfter: boolean('audience_keep_after').notNull().default(false),
+  courseId: uuid('course_id').references(() => courses.id, { onDelete: 'set null' }),
+  recordingRelPath: text('recording_rel_path'),
   ...times
 }, (table) => [uniqueIndex('realtime_audience_token_hash_unique').on(table.audienceTokenHash)]);
 
@@ -139,8 +171,22 @@ export const transcripts = pgTable('transcripts', {
   folderId: uuid('folder_id').references(() => transcriptFolders.id, { onDelete: 'set null' }),
   starred: boolean('starred').notNull().default(false),
   tags: text('tags').array().notNull().default(sql`ARRAY[]::text[]`),
+  recordStatus: text('record_status').notNull().default('complete'),
+  startedAt: timestamp('started_at', { withTimezone: true }),
+  endedAt: timestamp('ended_at', { withTimezone: true }),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  purgeAfter: timestamp('purge_after', { withTimezone: true }),
+  courseId: uuid('course_id').references(() => courses.id, { onDelete: 'set null' }),
+  gaps: jsonb('gaps').$type<AudioGap[]>().notNull().default(sql`'[]'::jsonb`),
+  summaryStale: boolean('summary_stale').notNull().default(false),
+  summaryInputVersion: integer('summary_input_version').notNull().default(0),
+  summaryCitationHashes: jsonb('summary_citation_hashes').$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
+  noteEpoch: integer('note_epoch').notNull().default(0),
   ...times
-});
+}, (table) => [
+  index('transcripts_user_deleted_idx').on(table.userId, table.deletedAt),
+  uniqueIndex('transcripts_session_unique').on(table.sessionId)
+]);
 
 export const transcriptTasks = pgTable('transcript_tasks', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -172,8 +218,86 @@ export const transcriptSegments = pgTable('transcript_segments', {
   endMs: integer('end_ms'),
   sourceText: text('source_text').notNull().default(''),
   translationText: text('translation_text').notNull().default(''),
-  confidence: integer('confidence')
+  confidence: integer('confidence'),
+  sourceHash: text('source_hash')
 });
+
+export const sessionTokenChunks = pgTable('session_token_chunks', {
+  sessionId: uuid('session_id').notNull().references(() => realtimeSessions.id, { onDelete: 'cascade' }),
+  seq: integer('seq').notNull(),
+  tokens: jsonb('tokens').notNull(),
+  ...times
+}, (table) => [primaryKey({ columns: [table.sessionId, table.seq] })]);
+
+export const sessionMarkers = pgTable('session_markers', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  sessionId: uuid('session_id').references(() => realtimeSessions.id, { onDelete: 'cascade' }),
+  transcriptId: uuid('transcript_id').references(() => transcripts.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(),
+  note: text('note'),
+  wallMs: integer('wall_ms'),
+  audioMs: integer('audio_ms'),
+  segmentId: uuid('segment_id'),
+  deletedAt: timestamp('deleted_at', { withTimezone: true }),
+  ...times,
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull()
+}, (table) => [index('session_markers_session_idx').on(table.sessionId), index('session_markers_transcript_idx').on(table.transcriptId)]);
+
+export const noteVersions = pgTable('note_versions', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  transcriptId: uuid('transcript_id').notNull().references(() => transcripts.id, { onDelete: 'cascade' }),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  authorType: text('author_type').notNull(),
+  template: text('template'),
+  inputVersion: integer('input_version'),
+  provider: text('provider'),
+  body: text('body').notNull(),
+  taskId: uuid('task_id'),
+  ...times
+}, (table) => [index('note_versions_transcript_idx').on(table.transcriptId, table.createdAt)]);
+
+export const summaryRequests = pgTable('summary_requests', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  transcriptId: uuid('transcript_id').notNull().references(() => transcripts.id, { onDelete: 'cascade' }),
+  idempotencyKey: text('idempotency_key').notNull(),
+  inputHash: text('input_hash').notNull(),
+  inputVersion: integer('input_version').notNull(),
+  provider: text('provider').notNull(),
+  template: text('template').notNull(),
+  quoteSeconds: integer('quote_seconds').notNull().default(0),
+  status: text('status').notNull(),
+  noteEpoch: integer('note_epoch').notNull().default(0),
+  ...times
+}, (table) => [uniqueIndex('summary_requests_user_key_unique').on(table.userId, table.idempotencyKey)]);
+
+export const supportRequests = pgTable('support_requests', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').notNull().references(() => users.id, { onDelete: 'cascade' }),
+  kind: text('kind').notNull(),
+  category: text('category').notNull(),
+  body: text('body').notNull(),
+  sessionId: uuid('session_id'),
+  status: text('status').notNull().default('open'),
+  resolution: text('resolution'),
+  diagnostics: jsonb('diagnostics').$type<Record<string, string>>(),
+  ...times,
+  updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull()
+}, (table) => [index('support_requests_status_idx').on(table.status, table.createdAt)]);
+
+export const productEvents = pgTable('product_events', {
+  id: uuid('id').primaryKey().defaultRandom(),
+  userId: uuid('user_id').references(() => users.id, { onDelete: 'cascade' }),
+  name: text('name').notNull(),
+  dedupeKey: text('dedupe_key').notNull(),
+  source: text('source').notNull().default('server'),
+  props: jsonb('props').$type<Record<string, string | number | boolean | null>>().notNull().default(sql`'{}'::jsonb`),
+  ...times
+}, (table) => [
+  uniqueIndex('product_events_dedupe_unique').on(table.dedupeKey),
+  index('product_events_name_created_idx').on(table.name, table.createdAt)
+]);
 
 export const activationCodes = pgTable('activation_codes', {
   id: uuid('id').primaryKey().defaultRandom(),

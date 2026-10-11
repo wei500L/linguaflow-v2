@@ -85,6 +85,13 @@
       "when": 1791700000000,
       "tag": "0011_audit_controls",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1791711585275,
+      "tag": "0012_product_completeness_round",
+      "breakpoints": true
     }
   ]
 }
