@@ -150,6 +150,7 @@ const english: Record<string, string> = {
   '大约 {seconds} 秒': 'about {seconds} s', '{seconds} 秒': '{seconds} s',
   '这次生成没有完成。请重新确认后再试。': 'This note was not created. Confirm again to try.',
   '还有 {count} 项标记或缺口没有保存。': '{count} marks or gaps were not saved.',
+  '还有 {count} 项标记或缺口没有保存（{detail}）。': '{count} marks or gaps were not saved ({detail}).',
   '上一场还有 {count} 项标记或缺口没有保存。': '{count} marks or gaps from the last class were not saved.',
   '再试一次': 'Try again', '标记': 'Mark',
   '笔记版本加载失败': 'Could not load note versions', '标记加载失败': 'Could not load marks', '恢复版本失败': 'Could not restore that version', '保存标记失败': 'Could not save the mark', '删除标记失败': 'Could not delete the mark',

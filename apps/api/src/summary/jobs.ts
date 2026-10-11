@@ -1,4 +1,4 @@
-import { and, desc, eq, inArray, isNull, or, sql } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, not, or, sql } from 'drizzle-orm';
 import { sanitizeModelMarkdown, sourceHash, summaryAttemptOutcome, summaryInputHash, summaryReplay, preserveCitationSnapshot, type SummarySegmentInput } from '@linguaflow/shared';
 import { db } from '../db/index.js';
 import { noteVersions, realtimeSessions, summaryProviders, summaryRequests, transcriptSegments, transcriptTasks, transcripts, usageLedger } from '../db/schema.js';
@@ -21,6 +21,7 @@ const httpError = (statusCode: number, message: string, code?: string) => Object
 
 export async function markInterruptedSummaries() {
   const running = await db.select().from(summaryRequests).where(eq(summaryRequests.status, 'running'));
+  const retryTaskSync = new Set<string>();
   for (const request of running) {
     const [transcript] = await db.select({
       summaryStatus: transcripts.summaryStatus,
@@ -41,8 +42,15 @@ export async function markInterruptedSummaries() {
     });
     if (outcome === 'settle') await confirmSummaryUsage(request.userId, request.transcriptId);
     if (outcome === 'settle' || outcome === 'complete') {
-      await db.update(summaryRequests).set({ status: 'ready' }).where(and(eq(summaryRequests.id, request.id), eq(summaryRequests.status, 'running')));
-      if (transcript?.summaryMarkdown) await syncSummaryTasks(request.transcriptId, transcript.summaryMarkdown);
+      try {
+        await db.transaction(async (tx) => {
+          await tx.update(summaryRequests).set({ status: 'ready' }).where(and(eq(summaryRequests.id, request.id), eq(summaryRequests.status, 'running')));
+          if (transcript?.summaryMarkdown) await syncSummaryTasks(request.transcriptId, transcript.summaryMarkdown, tx);
+        });
+      } catch (error) {
+        retryTaskSync.add(request.id);
+        console.warn('[LinguaFlow] summary tasks still need repair', request.id, error instanceof Error ? error.message : 'unknown');
+      }
     } else if (outcome === 'refund') await refundSummaryUsage(request.userId, request.transcriptId);
   }
   const held = await db.select({ userId: usageLedger.userId, transcriptId: usageLedger.transcriptId }).from(usageLedger).where(and(eq(usageLedger.kind, 'summary'), eq(usageLedger.status, 'held')));
@@ -50,7 +58,8 @@ export async function markInterruptedSummaries() {
     if (row.transcriptId) await refundSummaryUsage(row.userId, row.transcriptId);
   }
   await db.update(transcripts).set({ summaryStatus: 'failed', summaryError: '总结已中断。' }).where(eq(transcripts.summaryStatus, 'running'));
-  await db.update(summaryRequests).set({ status: 'failed' }).where(eq(summaryRequests.status, 'running'));
+  const unfinished = eq(summaryRequests.status, 'running');
+  await db.update(summaryRequests).set({ status: 'failed' }).where(retryTaskSync.size ? and(unfinished, not(inArray(summaryRequests.id, [...retryTaskSync]))) : unfinished);
 }
 
 export function summarySourceHash(segments: SummarySegmentInput[]) {
@@ -82,8 +91,9 @@ async function snapshotNote(userId: string, transcript: typeof transcripts.$infe
     body: transcript.summaryMarkdown,
     inputHash: transcript.summarySourceHash,
     outputLanguage: transcript.summaryLanguage,
-    citationHashes: transcript.summaryCitationsVerified ? transcript.summaryCitationHashes : null,
-    sourceHash: transcript.summaryCitationsVerified ? transcript.summarySourceHash : null
+    citationHashes: transcript.summaryCitationHashes,
+    citationsVerified: transcript.summaryCitationsVerified,
+    sourceHash: transcript.summarySourceHash
   });
 }
 
@@ -108,38 +118,19 @@ async function runSummary(userId: string, transcriptId: string, template: Summar
     const hashes = Object.fromEntries(segments.map((segment) => [segment.id, segment.sourceText ? sourceHash(segment.sourceText) : '']));
     const sources = Object.fromEntries(segments.map((segment) => [segment.id, segment.sourceText]));
     const clean = sanitizeModelMarkdown(markdown, ids, hashes, sources);
-    const [updated] = await db.transaction(async (tx) => {
-      const [row] = await tx.update(transcripts).set({
-        summaryMarkdown: clean,
-        summaryStatus: 'ready',
-        summaryError: null,
-        summaryTemplate: template,
-        summaryLanguage: outputLanguage,
-        summaryModel: model,
-        summarySourceHash: hash,
-        summaryGeneratedAt: new Date(),
-        summaryEditedAt: null,
-        summaryBilling: billing,
-        summaryStale: false,
-        summaryCitationHashes: hashes,
-        summaryCitationsVerified: true
-      }).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), eq(transcripts.summaryStatus, 'running'), eq(transcripts.noteEpoch, epoch), isNull(transcripts.deletedAt))).returning({ id: transcripts.id });
-      if (!row) return [];
-      await tx.update(usageLedger).set({ status: 'settled' }).where(and(eq(usageLedger.userId, userId), eq(usageLedger.transcriptId, transcriptId), eq(usageLedger.kind, 'summary'), eq(usageLedger.status, 'held'), requestId ? or(eq(usageLedger.requestId, requestId), isNull(usageLedger.requestId)) : isNull(usageLedger.requestId)));
-      await tx.insert(noteVersions).values({ transcriptId, userId, authorType: 'ai', template, inputVersion: null, provider: billing, body: clean, inputHash: hash, outputLanguage, citationHashes: hashes, citationsVerified: true, sourceHash: hash });
-      await tx.update(summaryRequests).set({ status: 'ready' }).where(and(eq(summaryRequests.transcriptId, transcriptId), eq(summaryRequests.userId, userId), eq(summaryRequests.noteEpoch, epoch), eq(summaryRequests.status, 'running')));
-      return [row];
-    });
+    const updated = await commitFinishedSummary(db, { userId, transcriptId, markdown: clean, template, outputLanguage, model, hash, billing, epoch, requestId, citationHashes: hashes });
     if (updated) {
       committed = true;
-      await syncSummaryTasks(transcriptId, clean);
       await recordEvent({ userId, name: 'summary_succeeded', dedupeKey: `summary_succeeded:${transcriptId}:${hash}:${epoch}`, props: { transcriptId, template, provider: billing } });
     } else {
       await refundSummaryUsage(userId, transcriptId);
       await db.update(summaryRequests).set({ status: 'cancelled' }).where(and(eq(summaryRequests.transcriptId, transcriptId), eq(summaryRequests.userId, userId), eq(summaryRequests.status, 'running'), eq(summaryRequests.noteEpoch, epoch)));
     }
   } catch (error) {
-    if (committed) return;
+    if (committed) {
+      console.warn('[LinguaFlow] summary follow-up failed after commit', error instanceof Error ? error.message : 'unknown');
+      return;
+    }
     await refundSummaryUsage(userId, transcriptId);
     if (controller.signal.aborted || (error instanceof SummaryError && error.kind === 'cancelled')) {
       await restoreSummary(userId, transcriptId);
@@ -311,6 +302,45 @@ export async function startSummary(userId: string, transcriptId: string, templat
   }
 }
 
+export async function commitFinishedSummary(database: Pick<typeof db, 'transaction'>, input: {
+  userId: string;
+  transcriptId: string;
+  markdown: string;
+  template: SummaryTemplate;
+  outputLanguage: string;
+  model: string;
+  hash: string;
+  billing: 'platform' | 'byok';
+  epoch: number;
+  requestId: string | null;
+  citationHashes: Record<string, string>;
+}) {
+  const [updated] = await database.transaction(async (tx) => {
+    const [row] = await tx.update(transcripts).set({
+      summaryMarkdown: input.markdown,
+      summaryStatus: 'ready',
+      summaryError: null,
+      summaryTemplate: input.template,
+      summaryLanguage: input.outputLanguage,
+      summaryModel: input.model,
+      summarySourceHash: input.hash,
+      summaryGeneratedAt: new Date(),
+      summaryEditedAt: null,
+      summaryBilling: input.billing,
+      summaryStale: false,
+      summaryCitationHashes: input.citationHashes,
+      summaryCitationsVerified: true
+    }).where(and(eq(transcripts.id, input.transcriptId), eq(transcripts.userId, input.userId), eq(transcripts.summaryStatus, 'running'), eq(transcripts.noteEpoch, input.epoch), isNull(transcripts.deletedAt))).returning({ id: transcripts.id });
+    if (!row) return [];
+    await tx.update(usageLedger).set({ status: 'settled' }).where(and(eq(usageLedger.userId, input.userId), eq(usageLedger.transcriptId, input.transcriptId), eq(usageLedger.kind, 'summary'), eq(usageLedger.status, 'held'), input.requestId ? or(eq(usageLedger.requestId, input.requestId), isNull(usageLedger.requestId)) : isNull(usageLedger.requestId)));
+    await tx.insert(noteVersions).values({ transcriptId: input.transcriptId, userId: input.userId, authorType: 'ai', template: input.template, inputVersion: null, provider: input.billing, body: input.markdown, inputHash: input.hash, outputLanguage: input.outputLanguage, citationHashes: input.citationHashes, citationsVerified: true, sourceHash: input.hash });
+    await tx.update(summaryRequests).set({ status: 'ready' }).where(and(eq(summaryRequests.transcriptId, input.transcriptId), eq(summaryRequests.userId, input.userId), eq(summaryRequests.noteEpoch, input.epoch), eq(summaryRequests.status, 'running')));
+    await syncSummaryTasks(input.transcriptId, input.markdown, tx);
+    return [row];
+  });
+  return updated ?? null;
+}
+
 export async function syncSummaryTasks(transcriptId: string, markdown: string, executor: Pick<typeof db, 'select' | 'insert' | 'delete'> = db) {
   const items = extractActionItems(markdown);
   const existing = await executor.select().from(transcriptTasks).where(eq(transcriptTasks.transcriptId, transcriptId));
@@ -331,14 +361,14 @@ export async function markSummaryStale(userId: string, transcriptId: string) {
   return { stale, inputHash: hash, inputVersion };
 }
 
-export async function saveHumanNote(userId: string, transcriptId: string, markdown: string) {
-  const [row] = await db.select().from(transcripts).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
+export async function saveHumanNote(userId: string, transcriptId: string, markdown: string, database: Pick<typeof db, 'select' | 'transaction'> = db) {
+  const [row] = await database.select().from(transcripts).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
   if (!row) return null;
-  const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId));
+  const segments = await database.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId));
   const clean = sanitizeModelMarkdown(markdown, new Set(segments.map((segment) => segment.id)), undefined, undefined, false);
   const currentHashes = Object.fromEntries(segments.map((segment) => [segment.id, segment.sourceText ? sourceHash(segment.sourceText) : '']));
-  const kept = preserveCitationSnapshot(clean, { hashes: row.summaryCitationsVerified ? row.summaryCitationHashes : null, verified: row.summaryCitationsVerified }, currentHashes);
-  const [updated] = await db.transaction(async (tx) => {
+  const kept = preserveCitationSnapshot(clean, { markdown: row.summaryMarkdown ?? '', hashes: row.summaryCitationHashes, verified: row.summaryCitationsVerified }, currentHashes);
+  const [updated] = await database.transaction(async (tx) => {
     const [saved] = await tx.update(transcripts).set({
       summaryMarkdown: clean,
       summaryStatus: 'ready',
@@ -356,44 +386,47 @@ export async function saveHumanNote(userId: string, transcriptId: string, markdo
   return updated ?? null;
 }
 
-export async function restoreNoteVersion(userId: string, transcriptId: string, versionId: string) {
-  const [version] = await db.select().from(noteVersions).where(and(eq(noteVersions.id, versionId), eq(noteVersions.transcriptId, transcriptId), eq(noteVersions.userId, userId)));
+export async function restoreNoteVersion(userId: string, transcriptId: string, versionId: string, database: Pick<typeof db, 'select' | 'transaction'> = db) {
+  const [version] = await database.select().from(noteVersions).where(and(eq(noteVersions.id, versionId), eq(noteVersions.transcriptId, transcriptId), eq(noteVersions.userId, userId)));
   if (!version) return null;
-  const [row] = await db.select().from(transcripts).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
+  const [row] = await database.select().from(transcripts).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
   if (!row) return null;
-  const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId)).orderBy(transcriptSegments.idx);
+  const segments = await database.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId)).orderBy(transcriptSegments.idx);
   const currentHash = summaryInputHash(segments);
   const verified = version.citationsVerified ?? version.citationHashes != null;
-  const [updated] = await db.update(transcripts).set({
-    summaryMarkdown: version.body,
-    summaryStatus: 'ready',
-    summaryError: null,
-    summaryEditedAt: new Date(),
-    summaryTemplate: version.template ?? row.summaryTemplate,
-    summaryLanguage: version.outputLanguage ?? row.summaryLanguage,
-    summarySourceHash: version.sourceHash,
-    summaryCitationHashes: version.citationHashes ?? {},
-    summaryCitationsVerified: verified,
-    summaryStale: !verified || Boolean(version.sourceHash && version.sourceHash !== currentHash),
-    noteEpoch: row.noteEpoch + 1
-  }).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt))).returning();
-  if (!updated) return null;
-  await db.insert(noteVersions).values({
-    transcriptId,
-    userId,
-    authorType: 'restore',
-    template: version.template,
-    inputVersion: version.inputVersion,
-    provider: null,
-    body: version.body,
-    inputHash: version.inputHash,
-    outputLanguage: version.outputLanguage,
-    citationHashes: version.citationHashes,
-    citationsVerified: version.citationsVerified,
-    sourceHash: version.sourceHash
+  const [updated] = await database.transaction(async (tx) => {
+    const [saved] = await tx.update(transcripts).set({
+      summaryMarkdown: version.body,
+      summaryStatus: 'ready',
+      summaryError: null,
+      summaryEditedAt: new Date(),
+      summaryTemplate: version.template ?? row.summaryTemplate,
+      summaryLanguage: version.outputLanguage ?? row.summaryLanguage,
+      summarySourceHash: version.sourceHash,
+      summaryCitationHashes: version.citationHashes ?? {},
+      summaryCitationsVerified: verified,
+      summaryStale: !verified || Boolean(version.sourceHash && version.sourceHash !== currentHash),
+      noteEpoch: row.noteEpoch + 1
+    }).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt))).returning();
+    if (!saved) return [];
+    await tx.insert(noteVersions).values({
+      transcriptId,
+      userId,
+      authorType: 'restore',
+      template: version.template,
+      inputVersion: version.inputVersion,
+      provider: null,
+      body: version.body,
+      inputHash: version.inputHash,
+      outputLanguage: version.outputLanguage,
+      citationHashes: version.citationHashes,
+      citationsVerified: verified,
+      sourceHash: version.sourceHash
+    });
+    await syncSummaryTasks(transcriptId, version.body, tx);
+    return [saved];
   });
-  await syncSummaryTasks(transcriptId, version.body);
-  return updated;
+  return updated ?? null;
 }
 
 export async function cancelSummary(userId: string, transcriptId: string) {

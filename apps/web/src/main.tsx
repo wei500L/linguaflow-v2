@@ -12,6 +12,7 @@ import { InvitePanel } from './invite-panel';
 import { captureInvite } from './lib/invite';
 import { getLang, tr, useLang } from './lib/i18n';
 import { alignSentAudio, commitSentChunk, createLatencyClock, emptyLatencySamples, latencySampleProps, observeTranscript, pushLatencySample, readLatency, sameReadout, stampChunk, startMeasuring, type LatencyClock, type LatencyReadout } from './lib/latency';
+import { createControlQueue, enqueueControls, flushControlQueue, pendingControlMessage, postControlBatches } from './lib/control-queue';
 import { CourseBar } from './course-bar';
 import { HelpPage } from './help-page';
 import { LegalPage, MarketingPage } from './marketing';
@@ -573,14 +574,20 @@ function App() {
     const id = sessionId.current; sessionId.current = null;
     if (id && awaitingAck.current.size && getToken()) {
       try {
-        const savedIds = await submitControls(id, [...awaitingAck.current.values()]);
-        for (const savedId of savedIds) awaitingAck.current.delete(savedId);
-        publishUnsaved();
+        await postControlBatches({
+          sessionId: id,
+          entries: [...awaitingAck.current.values()],
+          post: (sessionId, items) => api<{ saved?: string[] }>(`/v1/realtime/sessions/${sessionId}/controls`, { method: 'POST', body: JSON.stringify({ items }) }),
+          onConfirmed: (savedIds) => {
+            for (const savedId of savedIds) awaitingAck.current.delete(savedId);
+            publishUnsaved();
+          }
+        });
         if (awaitingAck.current.size === 0) setAckFailed(false);
       } catch { setAckFailed(true); }
     }
     if (id) parkControls(id);
-    const unsavedLabels = [...awaitingAck.current.values()].map((item) => item.label);
+    const pendingNote = publishParked();
     const latencyProps = latencySampleProps(latencySamples.current);
     latencySamples.current = emptyLatencySamples();
     if (id && latencyProps && getToken()) void api('/v1/events', { method: 'POST', body: JSON.stringify({ name: 'latency_sample', dedupeKey: `latency:${id}`, props: { sessionId: id, ...latencyProps } }) }).catch(() => undefined);
@@ -603,11 +610,11 @@ function App() {
     closeTitleRef.current = '';
     setLiveSessionId(null);
     replacePath('/');
-    const pendingNote = unsavedLabels.length ? ` ${tr('还有 {count} 项标记或缺口没有保存。').replace('{count}', String(unsavedLabels.length))}` : '';
-    if (outcome === 'failed' || (confirmed?.saveStatus === 'failed' && !saved)) { showProblem(tr('保存失败。已收到的字幕没有完整写入，请重试确认。')); if (pendingNote) setSavedNote(pendingNote.trim()); }
-    else if (!saved) setSavedNote(`${tr('这次没有可保存的内容。')}${pendingNote}`);
-    else if (outcome === 'partial' || confirmed?.recordStatus === 'incomplete') setSavedNote(`${tr('记录已部分保存，并标为中断。')}${pendingNote}`);
-    else setSavedNote(`${tr('记录已保存。')}${pendingNote}`);
+    const pendingSuffix = pendingNote ? ` ${pendingNote}` : '';
+    if (outcome === 'failed' || (confirmed?.saveStatus === 'failed' && !saved)) { showProblem(tr('保存失败。已收到的字幕没有完整写入，请重试确认。')); if (pendingNote) setSavedNote(pendingNote); }
+    else if (!saved) setSavedNote(`${tr('这次没有可保存的内容。')}${pendingSuffix}`);
+    else if (outcome === 'partial' || confirmed?.recordStatus === 'incomplete') setSavedNote(`${tr('记录已部分保存，并标为中断。')}${pendingSuffix}`);
+    else setSavedNote(`${tr('记录已保存。')}${pendingSuffix}`);
     if (saved) { setEndedTranscriptId(saved); setSessionTitle(''); }
   }
   function requestClose() {
@@ -703,39 +710,40 @@ function App() {
   const sentAudioMs = useRef(0);
   const pendingControls = useRef<Array<Record<string, unknown>>>([]);
   const awaitingAck = useRef(new Map<string, { payload: Record<string, unknown>; label: string }>());
-  const parkedControls = useRef<{ sessionId: string; items: Array<{ payload: Record<string, unknown>; label: string }> } | null>(null);
+  const parkedControls = useRef(createControlQueue());
+  const parkedInFlight = useRef(new Map<string, Set<string>>());
   const [unsavedControls, setUnsavedControls] = useState<string[]>([]);
+  const [parkedNote, setParkedNote] = useState('');
   const [ackFailed, setAckFailed] = useState(false);
   const suspendStarted = useRef<number | null>(null);
   function wallClock() { return wallOrigin.current == null ? null : Date.now() - wallOrigin.current; }
   function publishUnsaved() {
     setUnsavedControls([...awaitingAck.current.values()].map((item) => item.label));
   }
-  async function submitControls(sessionId: string, entries: Array<{ payload: Record<string, unknown>; label: string }>) {
-    const savedIds = new Set<string>();
-    for (let index = 0; index < entries.length; index += 40) {
-      const items = entries.slice(index, index + 40).map((item) => item.payload);
-      const saved = await api<{ saved: string[] }>(`/v1/realtime/sessions/${sessionId}/controls`, { method: 'POST', body: JSON.stringify({ items }) });
-      for (const savedId of saved.saved ?? []) savedIds.add(savedId);
-    }
-    return savedIds;
+  function parkedText() {
+    const pending = pendingControlMessage(parkedControls.current);
+    if (!pending) return '';
+    return tr('还有 {count} 项标记或缺口没有保存（{detail}）。').replace('{count}', pending.count).replace('{detail}', pending.detail);
+  }
+  function publishParked() {
+    const text = parkedText();
+    setParkedNote(text);
+    return text;
   }
   function parkControls(sessionId: string | null) {
     if (!sessionId || !awaitingAck.current.size) return;
-    const previous = parkedControls.current?.sessionId === sessionId ? parkedControls.current.items : [];
-    parkedControls.current = { sessionId, items: [...previous, ...awaitingAck.current.values()] };
+    enqueueControls(parkedControls.current, sessionId, [...awaitingAck.current.values()]);
   }
   async function retryParked() {
-    const parked = parkedControls.current;
-    if (!parked || !getToken()) return;
-    try {
-      const savedIds = await submitControls(parked.sessionId, parked.items);
-      const left = parked.items.filter((item) => typeof item.payload.id !== 'string' || !savedIds.has(item.payload.id));
-      parkedControls.current = left.length ? { sessionId: parked.sessionId, items: left } : null;
-      if (left.length) setSavedNote(tr('上一场还有 {count} 项标记或缺口没有保存。').replace('{count}', String(left.length)));
-    } catch {
-      setSavedNote(tr('上一场还有 {count} 项标记或缺口没有保存。').replace('{count}', String(parked.items.length)));
+    if (getToken()) {
+      await flushControlQueue({
+        queue: parkedControls.current,
+        inFlight: parkedInFlight.current,
+        post: (sessionId, items) => api<{ saved?: string[] }>(`/v1/realtime/sessions/${sessionId}/controls`, { method: 'POST', body: JSON.stringify({ items }) })
+      });
     }
+    const text = publishParked();
+    if (text) setSavedNote(text);
   }
   function flushControls() {
     const socketOpen = socket.current?.readyState === WebSocket.OPEN ? socket.current : null;
@@ -817,6 +825,7 @@ function App() {
     routeEnded && routeEnded.id === routeSessionId && sessionStatus === 'idle' ? { id: 'route-ended', node: <div className="session-saved" role="status"><span>{tr('这场翻译已经结束，无法恢复。')}</span>{routeEnded.transcriptId && <button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(routeEnded.transcriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button>}<button type="button" className="link-button" onClick={() => replacePath('/')}>{tr('回到工作区')}</button></div> } : null,
     conflictSession && sessionStatus === 'idle' ? { id: 'conflict', node: <div className="record-notice" role="status"><p>{tr('上一场翻译还在占用额度。')}</p><button type="button" className="primary-button" onClick={() => void resumeConflict()}>{tr('恢复这场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(false)}>{tr('结束上一场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(true)}>{tr('结束上一场并开始')}</button></div> } : null,
     endedTranscriptId && sessionStatus === 'idle' ? { id: 'saved', node: <div className="session-saved" role="status"><span>{savedNote || tr('本次记录已保存。')}</span><button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(endedTranscriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button><button type="button" className="link-button" onClick={() => { setEndedTranscriptId(null); setSavedNote(''); }}>{tr('关闭')}</button></div> } : null,
+    parkedNote && sessionStatus === 'idle' && !endedTranscriptId ? { id: 'parked-controls', node: <div className="record-notice" role="status"><p>{parkedNote}</p></div> } : null,
     sessionLive && savedThrough ? { id: 'checkpoint', node: <div className="session-saved" role="status"><span>{saveState === 'failed' ? tr('保存失败') : tr('已保存到 {time}').replace('{time}', new Date(savedThrough).toLocaleTimeString())}{liveGaps.length > 0 ? ` · ${liveGaps.join(' · ')}` : ''}</span><span className="list-item-actions"><button type="button" className="link-button" onClick={() => addMarker('important')}>{tr('重点')}</button><button type="button" className="link-button" onClick={() => addMarker('unclear')}>{tr('没听懂')}</button><button type="button" className="link-button" onClick={() => addMarker('assignment')}>{tr('作业')}</button></span></div> } : null,
     sessionLive ? { id: 'marks', node: <div className="session-saved" role="group" aria-label={tr('课堂标记')}><button type="button" className="link-button" onClick={() => addMarker('important')}>{tr('重点')}</button><button type="button" className="link-button" onClick={() => addMarker('unclear')}>{tr('没听懂')}</button><button type="button" className="link-button" onClick={() => addMarker('assignment')}>{tr('作业')}</button></div> } : null,
     sessionStatus === 'idle' && authenticated ? { id: 'courses', node: <CourseBar disabled={busySession} languageA={languageA} languageB={languageB} recordAudio={recordAudio} glossaryId={glossaryId} onStart={(course) => void start(course)} /> } : null,

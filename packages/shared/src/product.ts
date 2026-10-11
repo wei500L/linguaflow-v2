@@ -229,9 +229,10 @@ export function languageRelation(mode: string, languageA: string, languageB: str
   return mode === 'two_way' ? `${languageA} ↔ ${languageB}` : `${languageA} → ${languageB}`;
 }
 
+/** A citation with no stored hash is unverified. A stored hash is compared with the current subtitle. The note-level flag does not override either result. */
 export function citationState(segmentId: string, snapshotHash: string | undefined, current: { source: string } | undefined, verified = true) {
   if (!current) return 'missing' as const;
-  if (!verified && !snapshotHash) return 'unverified' as const;
+  if (snapshotHash == null) return 'unverified' as const;
   if (!snapshotHash || snapshotHash === sourceHash(current.source)) return 'ok' as const;
   return 'changed' as const;
 }
@@ -285,16 +286,44 @@ export function mergeAudioGaps(saved: AudioGap[], incoming: AudioGap[]) {
 
 const CITE_ID = /\[\[seg:([0-9a-f-]{36})\]\]/gi;
 
-/** Editing the note text keeps each existing citation on its old snapshot. */
-export function preserveCitationSnapshot(markdown: string, previous: { hashes: Record<string, string> | null; verified: boolean }, current: Record<string, string>) {
+function citedIds(markdown: string) {
+  const ids = new Set<string>();
+  for (const match of markdown.matchAll(CITE_ID)) {
+    const id = match[1]?.toLowerCase();
+    if (id) ids.add(id);
+  }
+  return ids;
+}
+
+function lookupHash(hashes: Record<string, string> | null | undefined, id: string) {
+  if (!hashes) return undefined;
+  if (Object.prototype.hasOwnProperty.call(hashes, id)) return hashes[id];
+  const key = Object.keys(hashes).find((item) => item.toLowerCase() === id.toLowerCase());
+  return key == null ? undefined : hashes[key];
+}
+
+/** Existing citations keep their own snapshot. A citation that never had one stays unknown. Only a citation that is new in this note binds the current subtitle. */
+export function preserveCitationSnapshot(markdown: string, previous: { markdown: string; hashes: Record<string, string> | null; verified: boolean }, current: Record<string, string>) {
+  const previousIds = citedIds(previous.markdown);
   const hashes: Record<string, string> = {};
+  const seen = new Set<string>();
+  let unknown = false;
   for (const match of markdown.matchAll(CITE_ID)) {
     const id = match[1] ?? '';
-    const previousKey = Object.keys(previous.hashes ?? {}).find((key) => key.toLowerCase() === id.toLowerCase());
-    if (previous.hashes && previousKey) hashes[id] = previous.hashes[previousKey] ?? '';
-    else if (current[id]) hashes[id] = current[id];
+    const key = id.toLowerCase();
+    if (!id || seen.has(key)) continue;
+    seen.add(key);
+    if (previousIds.has(key)) {
+      const stored = lookupHash(previous.hashes, id);
+      if (stored == null) unknown = true;
+      else hashes[id] = stored;
+      continue;
+    }
+    const fresh = lookupHash(current, id);
+    if (fresh == null) unknown = true;
+    else hashes[id] = fresh;
   }
-  return { hashes, verified: previous.verified };
+  return { hashes, verified: seen.size === 0 ? previous.verified : !unknown };
 }
 
 /** A lost success can be replayed. A failed or cancelled confirmation has to start again. */

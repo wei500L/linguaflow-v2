@@ -193,6 +193,9 @@ test('a held summary is refunded unless this request already wrote the note', ()
   assert.equal(summaryReplay('ready'), 'return');
   assert.equal(summaryReplay('failed'), 'restart');
   assert.equal(citationState('seg', undefined, { source: '原文 B' }, false), 'unverified');
+  assert.equal(citationState('seg', undefined, { source: '原文 B' }, true), 'unverified');
+  assert.equal(citationState('seg', sourceHash('原文 B'), { source: '原文 B' }, false), 'ok');
+  assert.equal(citationState('seg', sourceHash('旧'), { source: '原文 B' }, false), 'changed');
   assert.equal(summaryAttemptOutcome({
     requestHash: 'hash-b',
     requestCreatedAtMs: 2_000,
@@ -211,9 +214,18 @@ test('a held summary is refunded unless this request already wrote the note', ()
   }), 'abandon');
   const merged = mergeAudioGaps([{ id: 'a', source: 'user_pause', wallStartMs: 1, wallEndMs: 2, audioStartMs: 1, audioEndMs: 2, precision: 'exact' }], [{ id: 'b', source: 'queue_overflow', wallStartMs: 3, wallEndMs: 4, audioStartMs: 3, audioEndMs: 4, precision: 'estimated' }]);
   assert.deepEqual(merged.map((gap) => gap.id), ['a', 'b']);
-  const kept = preserveCitationSnapshot('标题 [[seg:11111111-1111-4111-8111-111111111111]]', { hashes: { '11111111-1111-4111-8111-111111111111': 'old' }, verified: true }, { '11111111-1111-4111-8111-111111111111': 'new' });
-  assert.equal(kept.hashes['11111111-1111-4111-8111-111111111111'], 'old');
+  const cite = '11111111-1111-4111-8111-111111111111';
+  const other = '22222222-2222-4222-8222-222222222222';
+  const kept = preserveCitationSnapshot(`标题 [[seg:${cite}]]`, { markdown: `旧 [[seg:${cite}]]`, hashes: { [cite]: 'old' }, verified: true }, { [cite]: 'new' });
+  assert.equal(kept.hashes[cite], 'old');
   assert.equal(kept.verified, true);
+  const cosmetic = preserveCitationSnapshot(`标题\n[[seg:${cite}]]`, { markdown: `标题 [[seg:${cite}]]`, hashes: {}, verified: false }, { [cite]: 'current' });
+  assert.equal(cosmetic.hashes[cite], undefined);
+  assert.equal(cosmetic.verified, false);
+  assert.equal(citationState(cite, cosmetic.hashes[cite], { source: '原文' }, cosmetic.verified), 'unverified');
+  const inserted = preserveCitationSnapshot(`[[seg:${cite}]] [[seg:${other}]]`, { markdown: `[[seg:${cite}]]`, hashes: { [cite]: 'old-a', [other]: 'old-b' }, verified: true }, { [cite]: 'now-a', [other]: 'now-b' });
+  assert.equal(inserted.hashes[cite], 'old-a');
+  assert.equal(inserted.hashes[other], 'now-b');
 });
 
 test('after-class use only counts events after the session ends', () => {
