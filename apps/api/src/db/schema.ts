@@ -276,6 +276,11 @@ export const summaryRequests = pgTable('summary_requests', {
   quoteSeconds: integer('quote_seconds').notNull().default(0),
   status: text('status').notNull(),
   noteEpoch: integer('note_epoch').notNull().default(0),
+  outputMarkdown: text('output_markdown'),
+  outputCitationHashes: jsonb('output_citation_hashes').$type<Record<string, string> | null>(),
+  outputLanguage: text('output_language'),
+  outputModel: text('output_model'),
+  outputSavedAt: timestamp('output_saved_at', { withTimezone: true }),
   ...times
 }, (table) => [uniqueIndex('summary_requests_user_key_unique').on(table.userId, table.idempotencyKey)]);
 

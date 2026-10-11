@@ -47,13 +47,25 @@
 
 0013 给已有字幕加上 `summary_citations_verified` 时默认是 true。没有哈希的旧引用仍显示“来源无法验证”，之后的人工保存也不会补上当前哈希。
 
-## 未在本环境执行
+## 隔离验收证据
 
-- 没有连接生产库，也没有对生产数据做迁移。
-- 隔离库 `linguaflow_empty_20261011`：`drizzle-kit migrate` 应用到 15 条，`/health` 返回 200。引导账户可以密码登录，并在浏览器里把课程名改成“隔离验收课改”。库还在本机，服务器已停。
-- 隔离库 `linguaflow_upgrade_20261011`：先执行到 0011，写入旧笔记、字幕、已结算账本和分享，再执行 0012、0013、0014。正文、账本和分享都能读回。引用哈希为空，按当前规则是 unverified。这不是 `drizzle-kit migrate` 从 0011 的迁移表续跑，而是按 SQL 文件顺序执行。
-- 没有 fake Soniox、假模型和真实 PostgreSQL 的整节课。没有在事务提交前后杀掉 API 再重放同一次确认。
-- 没有真实 Soniox 或真实总结模型。
-- 登录后没有走完开课、标记、结束、搜索、生成、人工保存、恢复版本、分享、回收站和彻底删除。开课会连 Soniox，这次没有替身。
-- 没有 iPhone 真机。锁屏和来电不能靠桌面浏览器下结论。
-- 本地执行了 `pnpm typecheck`、`pnpm test`（API 124，Web 10）和 `pnpm build`，均通过。CI 配置仍然只有 typecheck 和 test。
+这些是本机运行记录，不是 CI 结果，也不是独立复核。
+
+- 空库到 0015：`scripts/isolation/migrate-evidence.sh`，结果在 `scripts/isolation/evidence/migrate-empty.txt`。`drizzle.__drizzle_migrations` 为 16 行，含 `output_markdown`。
+- 0011 升级到 0015：同一脚本。旧笔记、空引用哈希、已结算账本和分享都能读回，见 `scripts/isolation/evidence/migrate-upgrade.txt`。升级按 SQL 文件顺序执行，不是从 0011 的 drizzle 迁移表续跑。
+- 崩溃与重放：`scripts/isolation/crash-summary.ts`。假 Soniox 与假总结模型在 `apps/api/test/fakes/local-services.ts`。断言通过后的快照在 `scripts/isolation/evidence/crash-results.json`。模型结果先写入 `summary_requests.output_markdown`，完成事务回滚后重启只根据这一次的输出补正文和待办。
+- 浏览器：用 `VITE_TEST_AUDIO=1` 和上述假服务登录，保存课程「浏览器验收课」（en → zh，课堂笔记），刷新后仍显示该课程。开课写到了 `course_id`，字幕库有「积分。」和译文 `integral.`。客户端在约 15 秒时显示「连接超时」，会话被结束，标记、生成、分享和回收站没有在这次浏览器操作里走完。
+- 多场断网补交没有在浏览器里做。队列回归仍是 `apps/web/src/lib/control-queue.test.ts`。
+- 真 Soniox、真总结模型、iPhone 锁屏和来电没有做。
+
+崩溃点的本机断言：
+
+| 场景 | 模型调用 | 账本 |
+| --- | --- | --- |
+| 额度已占用、模型尚未返回时杀进程 | 0 | 60 秒仍为 held，没有结算 |
+| 同一确认在重启后重放 | 1 | 这 60 秒变为 settled，没有第二笔 |
+| 本次输出已持久化、待办修复仍失败 | 不再增加 | 新的 60 秒保持 held，旧笔记不被换成这次结果 |
+| 失败解除后再次重启 | 不再增加 | 这 60 秒结算，正文和待办是这次的版本 |
+| 完成事务提交前杀进程 | 1 | 新的 60 秒仍 held，页面上的旧正文保持原样 |
+| 重启后重放这次确认 | 0 | 新的 60 秒结算，正文换成这次输出 |
+| 提交后、客户端尚未看到成功时杀进程，再重放 | 0 | 结算总额不变，确认返回 ready 且 duplicate |

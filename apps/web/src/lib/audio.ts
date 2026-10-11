@@ -158,7 +158,15 @@ function attachScriptProcessor(context: AudioContext, source: MediaStreamAudioSo
   return processor;
 }
 
+function testPcmStream(onChunk: PcmChunkHandler) {
+  const timer = window.setInterval(() => {
+    onChunk(new ArrayBuffer(640), performance.now());
+  }, 40);
+  return { stop: async () => { window.clearInterval(timer); } };
+}
+
 export async function createPcmStream(onChunk: PcmChunkHandler, sourceType: AudioSource = 'microphone', onEnded?: () => void, deviceId?: string, onStalled?: (stalled: boolean) => void) {
+  if (import.meta.env.VITE_TEST_AUDIO === '1') return testPcmStream(onChunk);
   if (!navigator.mediaDevices) throw new Error('当前浏览器不支持音频采集。');
   if (sourceType === 'system' && !navigator.mediaDevices.getDisplayMedia) throw new Error('当前浏览器不支持系统声音采集，请改用麦克风。');
   if (sourceType === 'microphone' && !navigator.mediaDevices.getUserMedia) throw new Error('当前浏览器不支持麦克风采集。');

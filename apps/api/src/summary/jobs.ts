@@ -12,6 +12,7 @@ import { decryptSecret } from '../lib/secrets.js';
 import { assertSummaryEndpoint, endpointAllowsMissingKey } from '../lib/ssrf.js';
 import { extractActionItems, PLANS, type Plan } from '@linguaflow/shared';
 import { chatComplete } from './client.js';
+import { testBarrier } from './barrier.js';
 import { summarize, SUMMARY_TEMPLATES, SummaryError, type SummaryEntry, type SummaryTemplate } from './pipeline.js';
 
 type Job = { transcriptId: string; controller: AbortController };
@@ -19,10 +20,51 @@ const inflight = new Map<string, Job>();
 
 const httpError = (statusCode: number, message: string, code?: string) => Object.assign(new Error(message), { statusCode, code });
 
+async function applyStoredSummary(request: typeof summaryRequests.$inferSelect) {
+  if (!request.outputMarkdown) return false;
+  const updated = await commitFinishedSummary(db, {
+    userId: request.userId,
+    transcriptId: request.transcriptId,
+    markdown: request.outputMarkdown,
+    template: (SUMMARY_TEMPLATES as readonly string[]).includes(request.template) ? request.template as SummaryTemplate : 'classroom',
+    outputLanguage: request.outputLanguage ?? '中文',
+    model: request.outputModel ?? 'recovered',
+    hash: request.inputHash,
+    billing: request.provider === 'platform' ? 'platform' : 'byok',
+    epoch: request.noteEpoch,
+    requestId: request.id,
+    citationHashes: request.outputCitationHashes ?? {}
+  });
+  if (updated) return true;
+  const [row] = await db.select({ summaryMarkdown: transcripts.summaryMarkdown, summaryStatus: transcripts.summaryStatus }).from(transcripts).where(and(eq(transcripts.id, request.transcriptId), eq(transcripts.userId, request.userId)));
+  if (row?.summaryStatus === 'ready' && row.summaryMarkdown === request.outputMarkdown) {
+    await confirmSummaryUsage(request.userId, request.transcriptId);
+    await db.update(summaryRequests).set({ status: 'ready' }).where(and(eq(summaryRequests.id, request.id), eq(summaryRequests.status, 'running')));
+    return true;
+  }
+  return false;
+}
+
 export async function markInterruptedSummaries() {
   const running = await db.select().from(summaryRequests).where(eq(summaryRequests.status, 'running'));
-  const retryTaskSync = new Set<string>();
+  const retryStored = new Set<string>();
+  const keepTranscripts = new Set<string>();
   for (const request of running) {
+    if (request.outputMarkdown) {
+      try {
+        const applied = await applyStoredSummary(request);
+        if (!applied) {
+          retryStored.add(request.id);
+          keepTranscripts.add(request.transcriptId);
+          console.warn('[LinguaFlow] stored summary still needs repair', request.id);
+        }
+      } catch (error) {
+        retryStored.add(request.id);
+        keepTranscripts.add(request.transcriptId);
+        console.warn('[LinguaFlow] stored summary still needs repair', request.id, error instanceof Error ? error.message : 'unknown');
+      }
+      continue;
+    }
     const [transcript] = await db.select({
       summaryStatus: transcripts.summaryStatus,
       summarySourceHash: transcripts.summarySourceHash,
@@ -40,26 +82,33 @@ export async function markInterruptedSummaries() {
       generatedAtMs: transcript?.summaryGeneratedAt?.getTime() ?? null,
       ledger
     });
-    if (outcome === 'settle') await confirmSummaryUsage(request.userId, request.transcriptId);
     if (outcome === 'settle' || outcome === 'complete') {
-      try {
-        await db.transaction(async (tx) => {
-          await tx.update(summaryRequests).set({ status: 'ready' }).where(and(eq(summaryRequests.id, request.id), eq(summaryRequests.status, 'running')));
-          if (transcript?.summaryMarkdown) await syncSummaryTasks(request.transcriptId, transcript.summaryMarkdown, tx);
-        });
-      } catch (error) {
-        retryTaskSync.add(request.id);
+      if (outcome === 'settle') await confirmSummaryUsage(request.userId, request.transcriptId);
+      await db.update(summaryRequests).set({ status: 'ready' }).where(and(eq(summaryRequests.id, request.id), eq(summaryRequests.status, 'running')));
+      if (transcript?.summaryMarkdown) await syncSummaryTasks(request.transcriptId, transcript.summaryMarkdown).catch((error) => {
+        retryStored.add(request.id);
+        keepTranscripts.add(request.transcriptId);
         console.warn('[LinguaFlow] summary tasks still need repair', request.id, error instanceof Error ? error.message : 'unknown');
-      }
-    } else if (outcome === 'refund') await refundSummaryUsage(request.userId, request.transcriptId);
+      });
+    } else if (outcome === 'refund') {
+      await refundSummaryUsage(request.userId, request.transcriptId);
+      await db.update(summaryRequests).set({ status: 'failed' }).where(and(eq(summaryRequests.id, request.id), eq(summaryRequests.status, 'running')));
+      await restoreSummary(request.userId, request.transcriptId);
+    } else {
+      await db.update(summaryRequests).set({ status: 'failed' }).where(and(eq(summaryRequests.id, request.id), eq(summaryRequests.status, 'running')));
+      await restoreSummary(request.userId, request.transcriptId);
+    }
   }
   const held = await db.select({ userId: usageLedger.userId, transcriptId: usageLedger.transcriptId }).from(usageLedger).where(and(eq(usageLedger.kind, 'summary'), eq(usageLedger.status, 'held')));
   for (const row of held) {
+    if (row.transcriptId && keepTranscripts.has(row.transcriptId)) continue;
     if (row.transcriptId) await refundSummaryUsage(row.userId, row.transcriptId);
   }
-  await db.update(transcripts).set({ summaryStatus: 'failed', summaryError: '总结已中断。' }).where(eq(transcripts.summaryStatus, 'running'));
+  const runningNotes = await db.select({ id: transcripts.id }).from(transcripts).where(eq(transcripts.summaryStatus, 'running'));
+  const failNotes = runningNotes.filter((row) => !keepTranscripts.has(row.id)).map((row) => row.id);
+  if (failNotes.length) await db.update(transcripts).set({ summaryStatus: 'failed', summaryError: '总结已中断。' }).where(inArray(transcripts.id, failNotes));
   const unfinished = eq(summaryRequests.status, 'running');
-  await db.update(summaryRequests).set({ status: 'failed' }).where(retryTaskSync.size ? and(unfinished, not(inArray(summaryRequests.id, [...retryTaskSync]))) : unfinished);
+  await db.update(summaryRequests).set({ status: 'failed' }).where(retryStored.size ? and(unfinished, not(inArray(summaryRequests.id, [...retryStored]))) : unfinished);
 }
 
 export function summarySourceHash(segments: SummarySegmentInput[]) {
@@ -97,9 +146,16 @@ async function snapshotNote(userId: string, transcript: typeof transcripts.$infe
   });
 }
 
+async function requestOutputSaved(requestId: string | null) {
+  if (!requestId) return false;
+  const [row] = await db.select({ outputMarkdown: summaryRequests.outputMarkdown }).from(summaryRequests).where(eq(summaryRequests.id, requestId));
+  return Boolean(row?.outputMarkdown);
+}
+
 async function runSummary(userId: string, transcriptId: string, template: SummaryTemplate, outputLanguage: string, apiBase: string, apiKey: string | undefined, model: string, billing: 'platform' | 'byok', entries: SummaryEntry[], segments: SummarySegmentInput[], hash: string, epoch: number, controller: AbortController, requestId: string | null) {
   let committed = false;
   try {
+    await testBarrier('summary-held');
     const markdown = await summarize(entries, {
       template,
       outputLanguage,
@@ -118,9 +174,14 @@ async function runSummary(userId: string, transcriptId: string, template: Summar
     const hashes = Object.fromEntries(segments.map((segment) => [segment.id, segment.sourceText ? sourceHash(segment.sourceText) : '']));
     const sources = Object.fromEntries(segments.map((segment) => [segment.id, segment.sourceText]));
     const clean = sanitizeModelMarkdown(markdown, ids, hashes, sources);
+    if (requestId) {
+      await db.update(summaryRequests).set({ outputMarkdown: clean, outputCitationHashes: hashes, outputLanguage, outputModel: model, outputSavedAt: new Date() }).where(and(eq(summaryRequests.id, requestId), eq(summaryRequests.status, 'running')));
+    }
+    await testBarrier('summary-output-persisted');
     const updated = await commitFinishedSummary(db, { userId, transcriptId, markdown: clean, template, outputLanguage, model, hash, billing, epoch, requestId, citationHashes: hashes });
     if (updated) {
       committed = true;
+      await testBarrier('summary-committed');
       await recordEvent({ userId, name: 'summary_succeeded', dedupeKey: `summary_succeeded:${transcriptId}:${hash}:${epoch}`, props: { transcriptId, template, provider: billing } });
     } else {
       await refundSummaryUsage(userId, transcriptId);
@@ -129,6 +190,10 @@ async function runSummary(userId: string, transcriptId: string, template: Summar
   } catch (error) {
     if (committed) {
       console.warn('[LinguaFlow] summary follow-up failed after commit', error instanceof Error ? error.message : 'unknown');
+      return;
+    }
+    if (await requestOutputSaved(requestId)) {
+      console.warn('[LinguaFlow] summary output is saved and will be applied without another model call', requestId);
       return;
     }
     await refundSummaryUsage(userId, transcriptId);
@@ -316,6 +381,7 @@ export async function commitFinishedSummary(database: Pick<typeof db, 'transacti
   citationHashes: Record<string, string>;
 }) {
   const [updated] = await database.transaction(async (tx) => {
+    await testBarrier('summary-before-commit');
     const [row] = await tx.update(transcripts).set({
       summaryMarkdown: input.markdown,
       summaryStatus: 'ready',
@@ -342,6 +408,7 @@ export async function commitFinishedSummary(database: Pick<typeof db, 'transacti
 }
 
 export async function syncSummaryTasks(transcriptId: string, markdown: string, executor: Pick<typeof db, 'select' | 'insert' | 'delete'> = db) {
+  if (process.env.LINGUAFLOW_FAIL_SUMMARY_TASKS === '1') throw new Error('injected summary task failure');
   const items = extractActionItems(markdown);
   const existing = await executor.select().from(transcriptTasks).where(eq(transcriptTasks.transcriptId, transcriptId));
   const done = new Set(existing.filter((task) => task.done).map((task) => task.text));
