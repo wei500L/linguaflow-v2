@@ -206,6 +206,7 @@ export const usageLedger = pgTable('usage_ledger', {
   source: text('source').notNull(),
   kind: text('kind').notNull().default('session'),
   status: text('status').notNull().default('settled'),
+  requestId: uuid('request_id'),
   ...times
 });
 
@@ -257,6 +258,7 @@ export const noteVersions = pgTable('note_versions', {
   inputHash: text('input_hash'),
   outputLanguage: text('output_language'),
   citationHashes: jsonb('citation_hashes').$type<Record<string, string> | null>(),
+  citationsVerified: boolean('citations_verified'),
   sourceHash: text('source_hash'),
   taskId: uuid('task_id'),
   ...times

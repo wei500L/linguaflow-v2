@@ -9,7 +9,7 @@ import { recordEvent } from '../lib/events.js';
 import { holdFreeDevice, remainingSeconds } from '../lib/quota.js';
 import { PLANS } from '@linguaflow/shared';
 import { audienceReveal, newAudienceToken, revokeAudienceShare } from '../lib/audience.js';
-import { audienceCount, closeActiveSession, dropAudience, handleRealtimeSocket, holdSession } from '../realtime/proxy.js';
+import { audienceCount, closeActiveSession, dropAudience, handleRealtimeSocket, holdSession, noteRoomGap } from '../realtime/proxy.js';
 import { finalizePersistedSession, rememberGap, rememberMarker } from '../realtime/persist.js';
 import { glossaryInjection, sameLanguageResponse, type GlossaryMeta, type SonioxSessionInput } from '../realtime/soniox.js';
 import { socketUrl } from '../lib/socket-url.js';
@@ -223,8 +223,9 @@ export async function realtimeRoutes(app: FastifyInstance) {
         if (ok) saved.push(item.id);
       }
       if (item.type === 'gap' && item.source && item.precision) {
-        const ok = await rememberGap(id, { id: item.id, source: item.source, wallStartMs: item.wallStartMs ?? null, wallEndMs: item.wallEndMs ?? null, audioStartMs: item.audioStartMs ?? null, audioEndMs: item.audioEndMs ?? null, precision: item.precision });
-        if (ok) saved.push(item.id);
+        const gap = { id: item.id, source: item.source, wallStartMs: item.wallStartMs ?? null, wallEndMs: item.wallEndMs ?? null, audioStartMs: item.audioStartMs ?? null, audioEndMs: item.audioEndMs ?? null, precision: item.precision };
+        const ok = await rememberGap(id, gap);
+        if (ok) { noteRoomGap(id, gap); saved.push(item.id); }
       }
     }
     return { saved };

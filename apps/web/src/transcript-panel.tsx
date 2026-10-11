@@ -324,6 +324,12 @@ export function TranscriptPanel({ onClose, focusId = null, onOpenAccount, onOpen
   useEffect(() => {
     const onPop = () => {
       if (!detailHistory.current) return;
+      if (skipLeavePrompt.current) {
+        skipLeavePrompt.current = false;
+        detailHistory.current = false;
+        closeDetail();
+        return;
+      }
       if (!noteDirtyRef.current || window.confirm(tr('笔记还有未保存的修改。确定离开吗？'))) {
         detailHistory.current = false;
         closeDetail();
@@ -337,8 +343,10 @@ export function TranscriptPanel({ onClose, focusId = null, onOpenAccount, onOpen
       if (detailHistory.current) { detailHistory.current = false; window.history.back(); }
     };
   }, []);
+  const skipLeavePrompt = useRef(false);
   function leaveDetail() {
     if (noteDirtyRef.current && !window.confirm(tr('笔记还有未保存的修改。确定离开吗？'))) return;
+    skipLeavePrompt.current = true;
     if (detailHistory.current) window.history.back();
     else closeDetail();
   }

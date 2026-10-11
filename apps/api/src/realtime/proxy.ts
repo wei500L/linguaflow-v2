@@ -40,6 +40,8 @@ type LiveRoom = {
   languageA: string;
   languageB: string;
   startedAt?: Date;
+  gaps: AudioGap[];
+  titleExplicit: boolean;
   /** PCM bytes forwarded to Soniox. A reconnecting host realigns its latency clock with this. */
   forwardedAudioBytes: number;
   lastAudioAt?: number;
@@ -116,6 +118,13 @@ export function renameLiveRoom(sessionId: string, title: string) {
   const room = rooms.get(sessionId);
   if (!room || room.ended) return;
   room.title = title.trim().slice(0, 120);
+  room.titleExplicit = false;
+}
+
+export function noteRoomGap(sessionId: string, gap: AudioGap) {
+  const room = rooms.get(sessionId);
+  if (!room || room.ended) return;
+  if (!room.gaps.some((item) => item.id === gap.id)) room.gaps.push(gap);
 }
 
 export function holdSession(sessionId: string) {
@@ -176,6 +185,8 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     languageA: session.languageA,
     languageB: session.languageB ?? session.targetLanguage ?? '',
     forwardedAudioBytes: 0,
+    gaps: [],
+    titleExplicit: false,
     allowed: Math.min(session.maxSessionSeconds, session.reservedSeconds),
     ended: false,
     stopRequested: false,
@@ -186,7 +197,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
   rooms.set(session.id, room);
   let recorder: SessionRecorder | null = null;
   let recordingSetupError: string | null = null;
-  const gaps: AudioGap[] = [];
+  const gaps = room.gaps;
   let checkpointTimer: NodeJS.Timeout | undefined;
   if (session.recordAudio) {
     try {
@@ -236,6 +247,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     audioMs: Math.round(room.forwardedAudioBytes / (PCM_BYTES_PER_SECOND / 1000)),
     gaps,
     startedAt: startedAt ?? room.startedAt ?? null,
+    titleExplicit: room.titleExplicit,
     force
   });
   const runFinish = async (reason: string) => {
@@ -254,7 +266,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     let transcriptId: string | null = null;
     let outcome: 'saved' | 'empty' | 'partial' | 'failed' | 'in_progress' = saved.ok ? 'empty' : 'failed';
     try {
-      const result = await finalizePersistedSession(session.id, reason, { interrupted: reason === 'interrupted' || reason === 'server_restart', audio, title: room.title, gaps, speakerNames: room.speakerNames });
+      const result = await finalizePersistedSession(session.id, reason, { interrupted: reason === 'interrupted' || reason === 'server_restart', audio, title: room.title, titleExplicit: room.titleExplicit, gaps, speakerNames: room.speakerNames });
       transcriptId = result.transcriptId;
       outcome = result.outcome;
       if (!saved.ok && transcriptId) outcome = 'partial';
@@ -357,12 +369,12 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
             return;
           }
           if (event.type === 'title') {
-            if (typeof event.title === 'string') room.title = event.title.trim().slice(0, 120);
+            if (typeof event.title === 'string' && event.title.trim()) { room.title = event.title.trim().slice(0, 120); room.titleExplicit = true; }
             publishAudience(room, { type: 'title', title: room.title });
             return;
           }
           if (event.type === 'stop') {
-            if (typeof event.title === 'string' && event.title.trim()) room.title = event.title.trim().slice(0, 120);
+            if (typeof event.title === 'string' && event.title.trim()) { room.title = event.title.trim().slice(0, 120); room.titleExplicit = true; }
             void requestDrain('completed');
             return;
           }

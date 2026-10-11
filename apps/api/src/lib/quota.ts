@@ -116,7 +116,7 @@ export async function reserveSummaryUsage(userId: string, transcriptId: string, 
   });
 }
 
-export async function reserveQuotedSummary(userId: string, transcriptId: string, seconds: number, device?: DeviceRef | null) {
+export async function reserveQuotedSummary(userId: string, transcriptId: string, seconds: number, device?: DeviceRef | null, requestId?: string | null) {
   if (seconds <= 0) return { seconds: 0 };
   const row = await ensureEntitlement(userId);
   return db.transaction(async (tx) => {
@@ -128,8 +128,8 @@ export async function reserveQuotedSummary(userId: string, transcriptId: string,
       usedSecondsThisPeriod: query`${entitlements.usedSecondsThisPeriod} + ${split.planSeconds}`,
       addonSeconds: query`${entitlements.addonSeconds} - ${split.addonSeconds}`
     }).where(eq(entitlements.userId, userId));
-    if (split.planSeconds) await tx.insert(usageLedger).values({ userId, transcriptId, seconds: split.planSeconds, source: 'plan', kind: 'summary', status: 'held' });
-    if (split.addonSeconds) await tx.insert(usageLedger).values({ userId, transcriptId, seconds: split.addonSeconds, source: 'addon', kind: 'summary', status: 'held' });
+    if (split.planSeconds) await tx.insert(usageLedger).values({ userId, transcriptId, seconds: split.planSeconds, source: 'plan', kind: 'summary', status: 'held', requestId: requestId ?? null });
+    if (split.addonSeconds) await tx.insert(usageLedger).values({ userId, transcriptId, seconds: split.addonSeconds, source: 'addon', kind: 'summary', status: 'held', requestId: requestId ?? null });
     return { seconds, plan: row.plan };
   });
 }

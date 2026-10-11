@@ -81,7 +81,7 @@ function App() {
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({}); const [namingSpeaker, setNamingSpeaker] = useState<string | null>(null); const [speakerDraft, setSpeakerDraft] = useState('');
   const [mics, setMics] = useState<Array<{ id: string; label: string }>>([]); const [micId, setMicId] = useState(() => localStorage.getItem('linguaflow_mic') || ''); const [liveNotice, setLiveNotice] = useState(''); const [savedNote, setSavedNote] = useState(''); const [savedThrough, setSavedThrough] = useState<string | null>(null); const [saveState, setSaveState] = useState<'saved' | 'failed' | 'pending'>('pending'); const [liveGaps, setLiveGaps] = useState<string[]>([]);
   const [audioStalled, setAudioStalled] = useState(false); const sessionReady = useRef(false);
-  const acceptAudio = useRef(false); const userStop = useRef(false); const recoverLock = useRef(false); const readyWait = useRef<((ok: boolean) => void) | null>(null); const speakerNamesRef = useRef<Record<string, string>>({}); const closeTitleRef = useRef('');
+  const acceptAudio = useRef(false); const userStop = useRef(false); const recoverLock = useRef(false); const readyWait = useRef<((ok: boolean) => void) | null>(null); const speakerNamesRef = useRef<Record<string, string>>({}); const closeTitleRef = useRef(''); const titleTouchedRef = useRef(false);
   const limitSeconds = useRef<number | null>(null); const readyAt = useRef<number | null>(null); const savedTranscriptId = useRef<string | null>(null); const finishOutcome = useRef<string | null>(null); const stopLock = useRef<Promise<void> | null>(null);
   const statusRef = useRef<SessionStatus>('idle'); const generation = useRef(0); const authToken = useRef(getToken()); const sessionId = useRef<string | null>(null); const socket = useRef<WebSocket | null>(null); const audio = useRef<{ stop: () => Promise<void> } | null>(null); const keepalive = useRef<number | null>(null); const startupTimer = useRef<number | null>(null); const drain = useRef<(() => void) | null>(null); const upstreamDone = useRef(false); const audioQueue = useRef<Array<{ pcm: ArrayBuffer; durationMs: number; capturedAt: number }>>([]); const latencyClock = useRef<LatencyClock>(createLatencyClock()); const latencySamples = useRef(emptyLatencySamples()); const [latency, setLatency] = useState<LatencyReadout>(NO_LATENCY);
   const running = sessionStatus === 'running'; const busySession = sessionStatus !== 'idle';
@@ -101,7 +101,7 @@ function App() {
     if (sessionStatus !== 'running' && sessionStatus !== 'reconnecting') return;
     const handle = window.setTimeout(() => {
       const title = sessionTitle.trim().slice(0, 120);
-      if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: 'title', title }));
+      if (titleTouchedRef.current && socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: 'title', title }));
     }, 400);
     return () => window.clearTimeout(handle);
   }, [sessionTitle, sessionStatus]);
@@ -482,7 +482,11 @@ function App() {
     sessionReady.current = false;
     setAudioStalled(false);
     speakerNamesRef.current = {};
-    setSpeakerNames({}); setNamingSpeaker(null); setLiveNotice(''); setClosePrompt(false); closeTitleRef.current = sessionTitle.trim().slice(0, 120);
+    parkControls(sessionId.current);
+    awaitingAck.current.clear();
+    setUnsavedControls([]);
+    void retryParked();
+    setSpeakerNames({}); setNamingSpeaker(null); setLiveNotice(''); setClosePrompt(false); closeTitleRef.current = sessionTitle.trim().slice(0, 120); titleTouchedRef.current = false;
     showProblem(''); setSavedNote(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; latencyClock.current = createLatencyClock(); setLatency(NO_LATENCY); savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null; wallOrigin.current = null; sentAudioMs.current = 0; pendingControls.current = []; awaitingAck.current.clear(); setUnsavedControls([]); setAckFailed(false); latencySamples.current = emptyLatencySamples(); setLiveGaps([]);
     updateSessionStatus('opening');
     try {
@@ -553,7 +557,7 @@ function App() {
       await flushQueuedAudio(ws);
       if (ws.readyState === WebSocket.OPEN) {
         ws.send(JSON.stringify({ type: 'speakers', names: speakerNamesRef.current }));
-        ws.send(JSON.stringify({ type: 'stop', title: closeTitleRef.current || undefined }));
+        ws.send(JSON.stringify(titleTouchedRef.current && closeTitleRef.current ? { type: 'stop', title: closeTitleRef.current } : { type: 'stop' }));
       }
       await new Promise<void>((resolve) => {
         const timer = window.setTimeout(resolve, 8_000);
@@ -568,14 +572,14 @@ function App() {
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close();
     const id = sessionId.current; sessionId.current = null;
     if (id && awaitingAck.current.size && getToken()) {
-      const items = [...awaitingAck.current.values()].map((item) => item.payload);
       try {
-        const saved = await api<{ saved: string[] }>(`/v1/realtime/sessions/${id}/controls`, { method: 'POST', body: JSON.stringify({ items }) });
-        for (const savedId of saved.saved ?? []) awaitingAck.current.delete(savedId);
+        const savedIds = await submitControls(id, [...awaitingAck.current.values()]);
+        for (const savedId of savedIds) awaitingAck.current.delete(savedId);
         publishUnsaved();
         if (awaitingAck.current.size === 0) setAckFailed(false);
       } catch { setAckFailed(true); }
     }
+    if (id) parkControls(id);
     const unsavedLabels = [...awaitingAck.current.values()].map((item) => item.label);
     const latencyProps = latencySampleProps(latencySamples.current);
     latencySamples.current = emptyLatencySamples();
@@ -699,12 +703,39 @@ function App() {
   const sentAudioMs = useRef(0);
   const pendingControls = useRef<Array<Record<string, unknown>>>([]);
   const awaitingAck = useRef(new Map<string, { payload: Record<string, unknown>; label: string }>());
+  const parkedControls = useRef<{ sessionId: string; items: Array<{ payload: Record<string, unknown>; label: string }> } | null>(null);
   const [unsavedControls, setUnsavedControls] = useState<string[]>([]);
   const [ackFailed, setAckFailed] = useState(false);
   const suspendStarted = useRef<number | null>(null);
   function wallClock() { return wallOrigin.current == null ? null : Date.now() - wallOrigin.current; }
   function publishUnsaved() {
     setUnsavedControls([...awaitingAck.current.values()].map((item) => item.label));
+  }
+  async function submitControls(sessionId: string, entries: Array<{ payload: Record<string, unknown>; label: string }>) {
+    const savedIds = new Set<string>();
+    for (let index = 0; index < entries.length; index += 40) {
+      const items = entries.slice(index, index + 40).map((item) => item.payload);
+      const saved = await api<{ saved: string[] }>(`/v1/realtime/sessions/${sessionId}/controls`, { method: 'POST', body: JSON.stringify({ items }) });
+      for (const savedId of saved.saved ?? []) savedIds.add(savedId);
+    }
+    return savedIds;
+  }
+  function parkControls(sessionId: string | null) {
+    if (!sessionId || !awaitingAck.current.size) return;
+    const previous = parkedControls.current?.sessionId === sessionId ? parkedControls.current.items : [];
+    parkedControls.current = { sessionId, items: [...previous, ...awaitingAck.current.values()] };
+  }
+  async function retryParked() {
+    const parked = parkedControls.current;
+    if (!parked || !getToken()) return;
+    try {
+      const savedIds = await submitControls(parked.sessionId, parked.items);
+      const left = parked.items.filter((item) => typeof item.payload.id !== 'string' || !savedIds.has(item.payload.id));
+      parkedControls.current = left.length ? { sessionId: parked.sessionId, items: left } : null;
+      if (left.length) setSavedNote(tr('上一场还有 {count} 项标记或缺口没有保存。').replace('{count}', String(left.length)));
+    } catch {
+      setSavedNote(tr('上一场还有 {count} 项标记或缺口没有保存。').replace('{count}', String(parked.items.length)));
+    }
   }
   function flushControls() {
     const socketOpen = socket.current?.readyState === WebSocket.OPEN ? socket.current : null;
@@ -778,7 +809,7 @@ function App() {
 
   /* Highest priority first. SessionNotices renders only the first one. */
   const notices: Array<Notice | null> = [
-    closePrompt ? { id: 'close', node: <form className="close-title" onSubmit={(event) => { event.preventDefault(); confirmClose(); }}><label>{tr('这场翻译的名称')}<input value={sessionTitle} onChange={(event) => setSessionTitle(event.target.value)} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} autoFocus /></label><button className="primary-button" type="submit">{tr('保存并结束')}</button><button type="button" className="link-button" onClick={() => setClosePrompt(false)}>{tr('继续翻译')}</button></form> } : null,
+    closePrompt ? { id: 'close', node: <form className="close-title" onSubmit={(event) => { event.preventDefault(); confirmClose(); }}><label>{tr('这场翻译的名称')}<input value={sessionTitle} onChange={(event) => { titleTouchedRef.current = true; setSessionTitle(event.target.value); }} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} autoFocus /></label><button className="primary-button" type="submit">{tr('保存并结束')}</button><button type="button" className="link-button" onClick={() => setClosePrompt(false)}>{tr('继续翻译')}</button></form> } : null,
     namingSpeaker ? { id: 'speaker', node: <form className="speaker-rename-form" onSubmit={(event) => { event.preventDefault(); renameLiveSpeaker(); }}><label>{tr('改名为')}<input value={speakerDraft} onChange={(event) => setSpeakerDraft(event.target.value)} aria-label={tr('说话人名称')} autoFocus /></label><button className="secondary-button" type="submit">{tr('保存')}</button><button type="button" className="secondary-button" onClick={() => setNamingSpeaker(null)}>{tr('取消')}</button></form> } : null,
     error ? { id: 'error', node: <div className={`error-banner${recovery ? ' has-actions' : ''}`} role="alert"><span>{error}</span>{recovery && <><button type="button" className="primary-button" onClick={() => setPanel('pricing')}>{tr('打开套餐与激活码')}</button><button type="button" className="link-button" onClick={() => setPanel('invite')}>{tr('邀请朋友')}</button></>}</div> } : null,
     audioStalled && sessionLive ? { id: 'stalled', node: <div className="error-banner time-warning-banner" role="status">{tr('收音被系统暂停了，点一下屏幕继续。')}</div> } : null,
@@ -869,7 +900,7 @@ function App() {
         onMic={setMicId}
         onRecordAudio={setRecordAudio}
         onVoiceBoost={(value) => { voiceBoostOn.current = value; setVoiceBoost(value); }}
-        onSessionTitle={setSessionTitle}
+        onSessionTitle={(value) => { titleTouchedRef.current = true; setSessionTitle(value); }}
         onCaptionView={setCaptionView}
         onCaptionSize={setCaptionSize}
         onFullscreen={() => void toggleFullscreen()}

@@ -23,8 +23,11 @@ import {
   sharesRevivedOnRestore,
   shouldRecordReconnectGap,
   shouldRecoverSession,
+  summaryAttemptOutcome,
   summaryHoldRecovery,
   summaryReplay,
+  mergeAudioGaps,
+  preserveCitationSnapshot,
   sourceHash,
   summarizeProductMetrics,
   summaryInputHash,
@@ -189,7 +192,28 @@ test('a held summary is refunded unless this request already wrote the note', ()
   }), 'settle');
   assert.equal(summaryReplay('ready'), 'return');
   assert.equal(summaryReplay('failed'), 'restart');
-  assert.equal(citationState('seg', 'other', { source: '原文 B' }, false), 'unverified');
+  assert.equal(citationState('seg', undefined, { source: '原文 B' }, false), 'unverified');
+  assert.equal(summaryAttemptOutcome({
+    requestHash: 'hash-b',
+    requestCreatedAtMs: 2_000,
+    transcriptStatus: 'ready',
+    sourceHash: 'hash-b',
+    generatedAtMs: 2_500,
+    ledger: 'settled'
+  }), 'complete');
+  assert.equal(summaryAttemptOutcome({
+    requestHash: 'hash-b',
+    requestCreatedAtMs: 2_000,
+    transcriptStatus: 'ready',
+    sourceHash: 'hash-a',
+    generatedAtMs: 1_000,
+    ledger: 'settled'
+  }), 'abandon');
+  const merged = mergeAudioGaps([{ id: 'a', source: 'user_pause', wallStartMs: 1, wallEndMs: 2, audioStartMs: 1, audioEndMs: 2, precision: 'exact' }], [{ id: 'b', source: 'queue_overflow', wallStartMs: 3, wallEndMs: 4, audioStartMs: 3, audioEndMs: 4, precision: 'estimated' }]);
+  assert.deepEqual(merged.map((gap) => gap.id), ['a', 'b']);
+  const kept = preserveCitationSnapshot('标题 [[seg:11111111-1111-4111-8111-111111111111]]', { hashes: { '11111111-1111-4111-8111-111111111111': 'old' }, verified: true }, { '11111111-1111-4111-8111-111111111111': 'new' });
+  assert.equal(kept.hashes['11111111-1111-4111-8111-111111111111'], 'old');
+  assert.equal(kept.verified, true);
 });
 
 test('after-class use only counts events after the session ends', () => {

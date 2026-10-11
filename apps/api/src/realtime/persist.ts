@@ -6,6 +6,7 @@ import {
   checkpointFailureAction,
   defaultSummaryTemplate,
   foldCaptionTurns,
+  mergeAudioGaps,
   mergePersistedSegments,
   sessionOutcome,
   type AudioGap,
@@ -91,15 +92,18 @@ export async function noteOwner(sessionId: string, status?: string) {
 }
 
 export async function rememberGap(sessionId: string, gap: AudioGap) {
-  const [session] = await db.select().from(realtimeSessions).where(eq(realtimeSessions.id, sessionId));
-  if (!session || session.endReason === 'purged') return false;
-  const gaps = asGaps(session.gaps);
-  if (gaps.some((item) => item.id === gap.id)) return true;
-  const next = [...gaps, gap].slice(-200);
-  await db.update(realtimeSessions).set({ gaps: next }).where(eq(realtimeSessions.id, sessionId));
-  await db.update(transcripts).set({ gaps: next }).where(and(eq(transcripts.sessionId, sessionId), isNull(transcripts.deletedAt)));
-  await recordEvent({ userId: session.userId, name: 'audio_gap', dedupeKey: `audio_gap:${sessionId}:${gap.id}`, props: { sessionId, gapSource: gap.source } });
-  return true;
+  return db.transaction(async (tx) => {
+    const [session] = await tx.select().from(realtimeSessions).where(eq(realtimeSessions.id, sessionId)).for('update');
+    if (!session || session.endReason === 'purged') return false;
+    const [draft] = await tx.select({ gaps: transcripts.gaps, deletedAt: transcripts.deletedAt }).from(transcripts).where(eq(transcripts.sessionId, sessionId)).limit(1);
+    if (draft?.deletedAt) return false;
+    const next = mergeAudioGaps(mergeAudioGaps(asGaps(session.gaps), asGaps(draft?.gaps)), [gap]);
+    if (next.length === asGaps(session.gaps).length && asGaps(session.gaps).some((item) => item.id === gap.id)) return true;
+    await tx.update(realtimeSessions).set({ gaps: next }).where(eq(realtimeSessions.id, sessionId));
+    await tx.update(transcripts).set({ gaps: next }).where(and(eq(transcripts.sessionId, sessionId), isNull(transcripts.deletedAt)));
+    await recordEvent({ userId: session.userId, name: 'audio_gap', dedupeKey: `audio_gap:${sessionId}:${gap.id}`, props: { sessionId, gapSource: gap.source } });
+    return true;
+  });
 }
 
 export async function rememberMarker(input: { id: string; userId: string; sessionId: string; kind: 'important' | 'unclear' | 'assignment'; note?: string | null; wallMs?: number | null; audioMs?: number | null }) {
@@ -132,6 +136,7 @@ export function persistCheckpoint(input: {
   startedAt: Date | null;
   force?: boolean;
   summaryTemplate?: string | null;
+  titleExplicit?: boolean;
 }): Promise<CheckpointResult> {
   const waiting = checkpointQueued.get(input.sessionId) ?? 0;
   if (waiting >= 2) {
@@ -159,6 +164,7 @@ async function writeCheckpoint(input: {
   startedAt: Date | null;
   force?: boolean;
   summaryTemplate?: string | null;
+  titleExplicit?: boolean;
 }): Promise<CheckpointResult> {
   const state = checkpointState.get(input.sessionId) ?? { count: 0, since: 0, savedThrough: null, seq: 0 };
   const now = Date.now();
@@ -189,7 +195,8 @@ async function writeCheckpoint(input: {
       if (fresh.length) {
         await tx.insert(sessionTokenChunks).values({ sessionId: input.sessionId, seq: persisted, tokens: fresh }).onConflictDoNothing();
       }
-      if (merged.length) transcriptId = await upsertDraft(tx, locked, merged, input, activeUntil, 'active', template);
+      const mergedGaps = mergeAudioGaps(asGaps(locked.gaps), input.gaps);
+      if (merged.length) transcriptId = await upsertDraft(tx, locked, merged, { ...input, gaps: mergedGaps }, activeUntil, 'active', template);
       nextSeq = locked.checkpointSeq + 1;
       await tx.update(realtimeSessions).set({
         persistedTokenCount: persisted + fresh.length,
@@ -201,8 +208,8 @@ async function writeCheckpoint(input: {
         audioMs: input.audioMs,
         segmentSnapshot: merged,
         speakerNames: input.speakerNames,
-        gaps: input.gaps.length ? input.gaps : asGaps(locked.gaps),
-        title: input.title.trim() || locked.title,
+        gaps: mergedGaps,
+        ...(input.titleExplicit && input.title.trim() ? { title: input.title.trim() } : {}),
         saveStatus: 'saved',
         saveError: null,
         startedAt: locked.startedAt ?? input.startedAt
@@ -227,15 +234,16 @@ async function writeCheckpoint(input: {
 type SessionRow = typeof realtimeSessions.$inferSelect;
 type TokenExecutor = Pick<typeof db, 'insert' | 'select' | 'update' | 'delete'>;
 
-async function upsertDraft(tx: TokenExecutor, session: SessionRow, merged: PersistedSegment[], input: { title: string; gaps: AudioGap[]; audioMs: number; speakerNames: Record<string, string> }, activeUntil: Date, recordStatus: 'active' | 'incomplete' | 'complete', summaryTemplate: string | null, audio?: FinishedAudio) {
+async function upsertDraft(tx: TokenExecutor, session: SessionRow, merged: PersistedSegment[], input: { title: string; gaps: AudioGap[]; audioMs: number; speakerNames: Record<string, string>; titleExplicit?: boolean }, activeUntil: Date, recordStatus: 'active' | 'incomplete' | 'complete', summaryTemplate: string | null, audio?: FinishedAudio) {
   const [existing] = await tx.select().from(transcripts).where(eq(transcripts.sessionId, session.id)).limit(1);
   if (existing?.deletedAt) return existing.id;
   const startedAt = session.startedAt;
   const wallMs = startedAt ? Math.max(0, activeUntil.getTime() - startedAt.getTime()) : 0;
   const incoming = input.title.trim();
-  const keepEditedTitle = Boolean(existing?.title && recordStatus === 'active' && incoming && incoming !== existing.title);
-  const title = keepEditedTitle ? existing?.title ?? incoming : incoming || session.title?.trim() || existing?.title || `翻译会话 · ${activeUntil.toLocaleString('zh-CN')}`;
-  const gaps = input.gaps.length ? input.gaps : asGaps(session.gaps);
+  const title = existing?.title && incoming && incoming !== existing.title && !input.titleExplicit
+    ? existing.title
+    : incoming || session.title?.trim() || existing?.title || `翻译会话 · ${activeUntil.toLocaleString('zh-CN')}`;
+  const gaps = mergeAudioGaps(mergeAudioGaps(asGaps(session.gaps), asGaps(existing?.gaps)), input.gaps);
   let transcriptId = existing?.id ?? null;
   if (!existing) {
     const template = summaryTemplate ?? defaultSummaryTemplate(session.mode === 'two_way' ? 'two_way' : 'one_way');
@@ -295,7 +303,7 @@ async function upsertDraft(tx: TokenExecutor, session: SessionRow, merged: Persi
   return transcriptId;
 }
 
-export async function finalizePersistedSession(sessionId: string, reason: string, options: { interrupted?: boolean; audio?: FinishedAudio; title?: string; gaps?: AudioGap[]; speakerNames?: Record<string, string> } = {}) {
+export async function finalizePersistedSession(sessionId: string, reason: string, options: { interrupted?: boolean; audio?: FinishedAudio; title?: string; titleExplicit?: boolean; gaps?: AudioGap[]; speakerNames?: Record<string, string> } = {}) {
   let audio = options.audio;
   let interrupted = options.interrupted ?? false;
   let template: string | null = null;
@@ -335,12 +343,14 @@ export async function finalizePersistedSession(sessionId: string, reason: string
     });
     const failed = session.saveStatus === 'failed';
     const recordStatus = interrupted || failed ? 'incomplete' : 'complete';
+    const mergedGaps = mergeAudioGaps(asGaps(session.gaps), options.gaps ?? []);
     const hasBody = merged.length > 0 || Boolean(audio?.relPath || session.recordingRelPath);
     let transcriptId: string | null = existing?.deletedAt ? existing.id : null;
     if (hasBody && !existing?.deletedAt) {
-      transcriptId = await upsertDraft(tx, { ...session, activeUntil }, merged, {
+      transcriptId = await upsertDraft(tx, { ...session, activeUntil, gaps: mergedGaps }, merged, {
         title: options.title ?? session.title ?? '',
-        gaps: options.gaps ?? asGaps(session.gaps),
+        titleExplicit: options.titleExplicit,
+        gaps: mergedGaps,
         audioMs: session.audioMs,
         speakerNames: names
       }, activeUntil, recordStatus, template, audio);
@@ -348,7 +358,7 @@ export async function finalizePersistedSession(sessionId: string, reason: string
     if (existing?.deletedAt) {
       return { missing: false as const, duplicate: false as const, userId: session.userId, transcriptId: null, seconds, reason, recordStatus: 'incomplete' as const, failed: true, keepAfter: false, hasBody: false };
     }
-    await tx.update(realtimeSessions).set({ segmentSnapshot: merged, gaps: options.gaps ?? asGaps(session.gaps) }).where(eq(realtimeSessions.id, sessionId));
+    await tx.update(realtimeSessions).set({ segmentSnapshot: merged, gaps: mergedGaps, title: options.titleExplicit ? (options.title ?? session.title) : session.title }).where(eq(realtimeSessions.id, sessionId));
     return { missing: false as const, duplicate: false as const, userId: session.userId, transcriptId, seconds, reason, recordStatus, failed, keepAfter: session.audienceKeepAfter && session.shareIntent === 'audience', hasBody };
   });
   if (prepared.missing) return { transcriptId: null, outcome: 'failed' as const, duplicate: false };

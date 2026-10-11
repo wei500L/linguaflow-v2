@@ -231,7 +231,7 @@ export function languageRelation(mode: string, languageA: string, languageB: str
 
 export function citationState(segmentId: string, snapshotHash: string | undefined, current: { source: string } | undefined, verified = true) {
   if (!current) return 'missing' as const;
-  if (!verified) return 'unverified' as const;
+  if (!verified && !snapshotHash) return 'unverified' as const;
   if (!snapshotHash || snapshotHash === sourceHash(current.source)) return 'ok' as const;
   return 'changed' as const;
 }
@@ -253,6 +253,48 @@ export function summaryHoldRecovery(input: {
     && input.requestCreatedAtMs != null
     && input.generatedAtMs >= input.requestCreatedAtMs;
   return produced ? 'settle' as const : 'refund' as const;
+}
+
+/** A finished note that is already settled must stay ready. Only an unfinished hold is refunded. */
+export function summaryAttemptOutcome(input: {
+  requestHash: string | null;
+  requestCreatedAtMs: number | null;
+  transcriptStatus: string | null;
+  sourceHash: string | null;
+  generatedAtMs: number | null;
+  ledger: 'held' | 'settled' | 'none';
+}) {
+  const produced = input.transcriptStatus === 'ready'
+    && input.requestHash != null
+    && input.sourceHash === input.requestHash
+    && input.generatedAtMs != null
+    && input.requestCreatedAtMs != null
+    && input.generatedAtMs >= input.requestCreatedAtMs;
+  if (!produced && input.ledger === 'held') return 'refund' as const;
+  if (!produced) return 'abandon' as const;
+  if (input.ledger === 'held') return 'settle' as const;
+  return 'complete' as const;
+}
+
+export function mergeAudioGaps(saved: AudioGap[], incoming: AudioGap[]) {
+  const byId = new Map<string, AudioGap>();
+  for (const gap of saved) byId.set(gap.id, gap);
+  for (const gap of incoming) if (!byId.has(gap.id)) byId.set(gap.id, gap);
+  return [...byId.values()].slice(-200);
+}
+
+const CITE_ID = /\[\[seg:([0-9a-f-]{36})\]\]/gi;
+
+/** Editing the note text keeps each existing citation on its old snapshot. */
+export function preserveCitationSnapshot(markdown: string, previous: { hashes: Record<string, string> | null; verified: boolean }, current: Record<string, string>) {
+  const hashes: Record<string, string> = {};
+  for (const match of markdown.matchAll(CITE_ID)) {
+    const id = match[1] ?? '';
+    const previousKey = Object.keys(previous.hashes ?? {}).find((key) => key.toLowerCase() === id.toLowerCase());
+    if (previous.hashes && previousKey) hashes[id] = previous.hashes[previousKey] ?? '';
+    else if (current[id]) hashes[id] = current[id];
+  }
+  return { hashes, verified: previous.verified };
 }
 
 /** A lost success can be replayed. A failed or cancelled confirmation has to start again. */
