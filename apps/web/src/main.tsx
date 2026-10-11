@@ -1,6 +1,6 @@
 import { StrictMode, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { createCaptionFold, ingestCaptionTokens, projectCaptionTurns, PLANS, type Entitlement, type RealtimeEvent, type TranscriptToken } from '@linguaflow/shared';
+import { acceptLiveEvent, createCaptionFold, ingestCaptionTokens, projectCaptionTurns, PLANS, reconnectDelayMs, reconnectExhausted, type Entitlement, type RealtimeEvent, type TranscriptToken } from '@linguaflow/shared';
 import { api, ApiError, clearToken, getToken, isTokenExpired, openSocket, setToken, tokenExpiresWithin } from './lib/api';
 import { shouldRefreshAccessToken } from './lib/session';
 import { PHONE_QUERY, useMediaQuery, useViewportHeight } from './lib/breakpoints';
@@ -12,6 +12,8 @@ import { InvitePanel } from './invite-panel';
 import { captureInvite } from './lib/invite';
 import { getLang, tr, useLang } from './lib/i18n';
 import { alignSentAudio, commitSentChunk, createLatencyClock, observeTranscript, readLatency, sameReadout, stampChunk, startMeasuring, type LatencyClock, type LatencyReadout } from './lib/latency';
+import { CourseBar } from './course-bar';
+import { HelpPage } from './help-page';
 import { LegalPage, MarketingPage } from './marketing';
 import { SharePage } from './share-page';
 import { TranscriptPanel } from './transcript-panel';
@@ -77,10 +79,10 @@ function App() {
   const [sessionTitle, setSessionTitle] = useState(''); const [closePrompt, setClosePrompt] = useState(false); const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
   const [showGuide, setShowGuide] = useState(() => localStorage.getItem('linguaflow_seen_guide') !== '1'); const [captionView, setCaptionView] = useState<CaptionView>(() => { const saved = localStorage.getItem('linguaflow_caption_view'); return saved === 'translation' || saved === 'source' ? saved : 'both'; });
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({}); const [namingSpeaker, setNamingSpeaker] = useState<string | null>(null); const [speakerDraft, setSpeakerDraft] = useState('');
-  const [mics, setMics] = useState<Array<{ id: string; label: string }>>([]); const [micId, setMicId] = useState(() => localStorage.getItem('linguaflow_mic') || ''); const [liveNotice, setLiveNotice] = useState(''); const [savedNote, setSavedNote] = useState('');
+  const [mics, setMics] = useState<Array<{ id: string; label: string }>>([]); const [micId, setMicId] = useState(() => localStorage.getItem('linguaflow_mic') || ''); const [liveNotice, setLiveNotice] = useState(''); const [savedNote, setSavedNote] = useState(''); const [savedThrough, setSavedThrough] = useState<string | null>(null); const [saveState, setSaveState] = useState<'saved' | 'failed' | 'pending'>('pending');
   const [audioStalled, setAudioStalled] = useState(false); const sessionReady = useRef(false);
   const acceptAudio = useRef(false); const userStop = useRef(false); const recoverLock = useRef(false); const readyWait = useRef<((ok: boolean) => void) | null>(null); const speakerNamesRef = useRef<Record<string, string>>({}); const closeTitleRef = useRef('');
-  const limitSeconds = useRef<number | null>(null); const readyAt = useRef<number | null>(null); const savedTranscriptId = useRef<string | null>(null);
+  const limitSeconds = useRef<number | null>(null); const readyAt = useRef<number | null>(null); const savedTranscriptId = useRef<string | null>(null); const finishOutcome = useRef<string | null>(null); const stopLock = useRef<Promise<void> | null>(null);
   const statusRef = useRef<SessionStatus>('idle'); const generation = useRef(0); const authToken = useRef(getToken()); const sessionId = useRef<string | null>(null); const socket = useRef<WebSocket | null>(null); const audio = useRef<{ stop: () => Promise<void> } | null>(null); const keepalive = useRef<number | null>(null); const startupTimer = useRef<number | null>(null); const drain = useRef<(() => void) | null>(null); const upstreamDone = useRef(false); const audioQueue = useRef<Array<{ pcm: ArrayBuffer; durationMs: number; capturedAt: number }>>([]); const latencyClock = useRef<LatencyClock>(createLatencyClock()); const [latency, setLatency] = useState<LatencyReadout>(NO_LATENCY);
   const running = sessionStatus === 'running'; const busySession = sessionStatus !== 'idle';
   function updateSessionStatus(next: SessionStatus) { statusRef.current = next; setSessionStatus(next); }
@@ -309,15 +311,25 @@ function App() {
     if (pausedRef.current) return;
     const stamped = stampChunk(pcm.byteLength, capturedAt);
     audioQueue.current.push({ pcm, ...stamped });
+    const queuedBefore = audioQueue.current.reduce((sum, item) => sum + item.durationMs, 0);
     trimQueuedAudio(audioQueue.current);
+    const droppedMs = queuedBefore - audioQueue.current.reduce((sum, item) => sum + item.durationMs, 0);
+    if (droppedMs > 0) sendControl({ type: 'gap', id: crypto.randomUUID(), source: 'queue_overflow', wallStartMs: null, wallEndMs: null, audioStartMs: 0, audioEndMs: droppedMs, precision: 'estimated' });
     if (acceptAudio.current) pumpAudio(socket.current);
   }
   function bindSocket(ws: WebSocket) {
     socket.current = ws;
     ws.onmessage = (event) => {
-      if (socket.current !== ws || userStop.current) return;
+      if (socket.current !== ws) return;
       try {
         const data = JSON.parse(event.data) as RealtimeEvent;
+        if (!acceptLiveEvent({ currentSocket: true, userStop: userStop.current, type: data.type })) return;
+        if (data.type === 'save_status') {
+          setSavedThrough(data.savedThrough);
+          setSaveState(data.status);
+          if (data.status === 'failed') showProblem(tr('字幕暂时没能保存。请结束这次翻译，已收到的内容会按最后一次成功保存处理。'));
+          return;
+        }
         if (data.type === 'ready') {
           if (typeof data.allowedSeconds === 'number') { limitSeconds.current = data.allowedSeconds; readyAt.current = Date.now(); }
           if (typeof data.receivedAudioMs === 'number') alignSentAudio(latencyClock.current, data.receivedAudioMs);
@@ -347,12 +359,12 @@ function App() {
         if (data.type === 'error') { showProblem(data.code === 'quota_exhausted' ? tr('额度已用完，本次会话已结束。') : data.code === 'session_limit_reached' ? tr('单次时长已到，本次会话已结束。') : data.message ?? data.code, data.code === 'quota_exhausted' ? 'quota' : null); if (data.code === 'quota_exhausted' || data.code === 'session_limit_reached') void stop(); else { releaseUpstream(); void stop({ alreadyFinished: true }); } }
         if (data.type === 'finished') {
           const expired = data.reason === 'expired';
+          finishOutcome.current = data.outcome ?? null;
+          if (data.transcriptId) savedTranscriptId.current = data.transcriptId;
           if (expired && data.transcriptId) setSavedNote(tr('长时间没有活动，这场翻译已结束。'));
           else if (expired) showProblem(tr('长时间没有活动，这场翻译已结束。'));
-          else setSavedNote('');
-          if (data.transcriptId) savedTranscriptId.current = data.transcriptId;
           releaseUpstream();
-          void stop({ alreadyFinished: true });
+          if (!userStop.current) void stop({ alreadyFinished: true });
         }
       } catch { showProblem(tr('收到无法识别的实时消息。')); releaseUpstream(); void stop({ alreadyFinished: true }); }
     };
@@ -383,21 +395,31 @@ function App() {
     updateSessionStatus('reconnecting');
     showProblem(tr('连接中断，正在恢复…'));
     let restored = false;
-    for (let attempt = 0; attempt < 3 && !userStop.current; attempt += 1) {
+    const started = Date.now();
+    let attempt = 0;
+    const online = new Promise<void>((resolve) => {
+      const listener = () => { window.removeEventListener('online', listener); resolve(); };
+      window.addEventListener('online', listener);
+    });
+    while (!userStop.current && !reconnectExhausted(started, Date.now())) {
       try {
         const session = await api<{ websocketUrl: string; websocketProtocols: string[] }>(`/v1/realtime/sessions/${current}/reconnect`, { method: 'POST' });
         if (userStop.current) break;
-        const opened = new Promise<boolean>((resolve) => { readyWait.current = resolve; });
+        const opened = new Promise<boolean>((resolve) => {
+          const timer = window.setTimeout(() => resolve(false), 4_000);
+          readyWait.current = (ok) => { window.clearTimeout(timer); resolve(ok); };
+        });
         bindSocket(openSocket(session.websocketUrl, session.websocketProtocols));
-        restored = await opened;
+        restored = await Promise.race([opened, online.then(() => false)]);
         if (restored) break;
       } catch (err) {
         readyWait.current = null;
         if (err instanceof ApiError && (err.status === 404 || err.status === 409)) break;
-        await new Promise((resolve) => window.setTimeout(resolve, 800));
       }
+      await new Promise((resolve) => window.setTimeout(resolve, reconnectDelayMs(attempt)));
+      attempt += 1;
     }
-    if (!restored && !userStop.current && statusRef.current !== 'idle' && statusRef.current !== 'stopping') {
+    if (!restored && !userStop.current && statusRef.current !== 'idle' && statusRef.current !== 'stopping' && statusRef.current !== 'saving') {
       userStop.current = true;
       recoverLock.current = false;
       showProblem(tr('无法恢复连接，会话已结束。'));
@@ -416,9 +438,15 @@ function App() {
     void listAudioInputs().then(setMics).catch(() => undefined);
     return true;
   }
-  async function start() {
+  async function start(course?: { id: string; mode: 'one_way' | 'two_way'; languageA: string; languageB: string; glossaryId?: string | null; recordAudio: boolean; title?: string | null }) {
     if (statusRef.current !== 'idle') return;
-    if (sameLanguage) { showProblem(tr('源语言和目标语言不能相同。')); return; }
+    const nextMode = course?.mode ?? mode;
+    const nextA = course?.languageA ?? languageA;
+    const nextB = course?.languageB ?? languageB;
+    const nextRecord = course?.recordAudio ?? recordAudio;
+    const nextGlossary = course ? (course.glossaryId ?? '') : glossaryId;
+    if (nextA.toLowerCase().split('-')[0] === nextB.toLowerCase().split('-')[0]) { showProblem(tr('源语言和目标语言不能相同。')); return; }
+    if (course) { setMode(nextMode); setLanguageA(nextA); setLanguageB(nextB); setRecordAudio(nextRecord); setGlossaryId(nextGlossary); if (course.title) setSessionTitle(course.title); }
     const id = ++generation.current;
     userStop.current = false;
     acceptAudio.current = false;
@@ -432,10 +460,11 @@ function App() {
       if (!await ensureAudio(id)) return;
       updateSessionStatus('connecting');
       startupTimer.current = window.setTimeout(() => { if (generation.current === id && (statusRef.current === 'connecting' || statusRef.current === 'opening')) { showProblem(tr('连接超时，请重试。')); void stop(); } }, 15_000);
-      const glossary = glossaryId ? { glossaryId } : {};
-      const named = sessionTitle.trim().slice(0, 120);
+      const glossary = nextGlossary ? { glossaryId: nextGlossary } : {};
+      const named = (course?.title || sessionTitle).trim().slice(0, 120);
       const title = named ? { title: named } : {};
-      const session = await api<{ sessionId: string; websocketUrl: string; websocketProtocols: string[] }>('/v1/realtime/sessions', { method: 'POST', body: JSON.stringify(mode === 'one_way' ? { type: 'one_way', languageA, targetLanguage: languageB, recordAudio, ...glossary, ...title } : { type: 'two_way', languageA, languageB, recordAudio, ...glossary, ...title }) });
+      const courseField = course ? { courseId: course.id } : {};
+      const session = await api<{ sessionId: string; websocketUrl: string; websocketProtocols: string[] }>('/v1/realtime/sessions', { method: 'POST', body: JSON.stringify(nextMode === 'one_way' ? { type: 'one_way', languageA: nextA, targetLanguage: nextB, recordAudio: nextRecord, shareIntent: 'personal', ...glossary, ...title, ...courseField } : { type: 'two_way', languageA: nextA, languageB: nextB, recordAudio: nextRecord, shareIntent: 'personal', ...glossary, ...title, ...courseField }) });
       if (generation.current !== id) { setLiveSessionId(null); void api(`/v1/realtime/sessions/${session.sessionId}`, { method: 'DELETE', headers: authToken.current ? { authorization: `Bearer ${authToken.current}` } : undefined }).catch(() => undefined); return; }
       sessionId.current = session.sessionId;
       setLiveSessionId(session.sessionId);
@@ -447,6 +476,7 @@ function App() {
       const cause = err as DOMException;
       if (err instanceof ApiError && err.code === 'session_conflict') { showProblem(tr('上一场翻译还在占用额度。')); const fallbackId = err.sessionId ?? null; if (fallbackId) setConflictSession({ id: fallbackId, mode, status: 'active', title: null, languageA: '', languageB: null, targetLanguage: null }); void api<{ session: ActiveSession | null }>('/v1/realtime/sessions/active').then((result) => { if (statusRef.current !== 'idle' || sessionId.current) return; if (result.session) setConflictSession(result.session); }).catch(() => undefined); }
       else if (err instanceof ApiError && err.code === 'quota_exhausted') showProblem(tr('额度已用完，无法开始新的翻译。'), 'quota');
+      else if (err instanceof ApiError && err.code === 'free_device_blocked' && err.reason === 'domain') showProblem(tr('这个邮箱域名不能再领取免费额度。开通套餐后可以继续使用。'), 'device');
       else if (err instanceof ApiError && err.code === 'free_device_blocked') showProblem(tr('这台设备已经使用过免费额度，新的免费账号不能再开始翻译。开通套餐后可以继续使用。'), 'device');
       else if (err instanceof ApiError && err.code === 'device_required') showProblem(tr('无法识别这台设备，请刷新页面后再试。'));
       else if (cause.name === 'NotAllowedError') showProblem(tr('音频权限被拒绝，请在浏览器中允许访问后重试。'));
@@ -456,14 +486,30 @@ function App() {
     }
   }
   function releaseUpstream() { upstreamDone.current = true; drain.current?.(); }
+  async function readSavedSession(id: string) {
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      try {
+        const result = await api<{ session: { transcriptId: string | null; endedAt: string | null; recordStatus: string | null; saveStatus: string } }>(`/v1/realtime/sessions/${id}`);
+        if (result.session.endedAt || result.session.transcriptId) return result.session;
+      } catch { /* The session may still be finishing. */ }
+      await new Promise((resolve) => window.setTimeout(resolve, 400));
+    }
+    return null;
+  }
   async function stop(options?: { alreadyFinished?: boolean }) {
-    if (statusRef.current === 'idle' || statusRef.current === 'stopping') return;
+    if (stopLock.current) return stopLock.current;
+    const run = finishStop(options);
+    stopLock.current = run;
+    try { await run; } finally { stopLock.current = null; }
+  }
+  async function finishStop(options?: { alreadyFinished?: boolean }) {
+    if (statusRef.current === 'idle' || statusRef.current === 'stopping' || statusRef.current === 'saving') return;
     userStop.current = true;
     acceptAudio.current = false;
     setClosePrompt(false);
     readyWait.current?.(false);
     readyWait.current = null;
-    updateSessionStatus('stopping');
+    updateSessionStatus('saving');
     if (startupTimer.current !== null) window.clearTimeout(startupTimer.current); startupTimer.current = null;
     if (keepalive.current !== null) window.clearInterval(keepalive.current); keepalive.current = null;
     const ws = socket.current;
@@ -485,10 +531,16 @@ function App() {
     socket.current = null;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close();
     const id = sessionId.current; sessionId.current = null;
-    if (id && getToken()) await api(`/v1/realtime/sessions/${id}`, { method: 'DELETE' }).catch(() => undefined);
+    let confirmed = id && getToken() ? await readSavedSession(id) : null;
+    if (id && getToken() && !confirmed?.endedAt) {
+      await api(`/v1/realtime/sessions/${id}`, { method: 'DELETE' }).catch(() => undefined);
+      confirmed = await readSavedSession(id);
+    }
     if (getToken()) void api<Entitlement>('/v1/me/entitlement').then(setEntitlement).catch(() => undefined);
-    const saved = savedTranscriptId.current;
+    const saved = savedTranscriptId.current ?? confirmed?.transcriptId ?? null;
+    const outcome = finishOutcome.current;
     savedTranscriptId.current = null;
+    finishOutcome.current = null;
     limitSeconds.current = null;
     readyAt.current = null;
     setRemainingSeconds(null);
@@ -498,6 +550,10 @@ function App() {
     closeTitleRef.current = '';
     setLiveSessionId(null);
     replacePath('/');
+    if (outcome === 'failed' || (confirmed?.saveStatus === 'failed' && !saved)) showProblem(tr('保存失败。已收到的字幕没有完整写入，请重试确认。'));
+    else if (!saved) setSavedNote(tr('这次没有可保存的内容。'));
+    else if (outcome === 'partial' || confirmed?.recordStatus === 'incomplete') setSavedNote(tr('记录已部分保存，并标为中断。'));
+    else setSavedNote(tr('记录已保存。'));
     if (saved) { setEndedTranscriptId(saved); setSessionTitle(''); }
   }
   function requestClose() {
@@ -588,7 +644,25 @@ function App() {
     setNamingSpeaker(null);
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: 'speakers', names: next }));
   }
-  function togglePause() { pausedRef.current = !pausedRef.current; setPaused(pausedRef.current); if (pausedRef.current) audioQueue.current = []; }
+  const pauseStarted = useRef<number | null>(null);
+  function sendControl(payload: unknown) {
+    if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(payload));
+  }
+  function togglePause() {
+    const next = !pausedRef.current;
+    pausedRef.current = next;
+    setPaused(next);
+    const wall = readyAt.current ? Date.now() - readyAt.current : null;
+    if (next) pauseStarted.current = wall;
+    else if (pauseStarted.current != null) {
+      sendControl({ type: 'gap', id: crypto.randomUUID(), source: 'user_pause', wallStartMs: pauseStarted.current, wallEndMs: wall, audioStartMs: null, audioEndMs: null, precision: wall == null ? 'unknown' : 'exact' });
+      pauseStarted.current = null;
+    }
+  }
+  function addMarker(kind: 'important' | 'unclear' | 'assignment') {
+    sendControl({ type: 'marker', id: crypto.randomUUID(), kind, wallMs: readyAt.current ? Date.now() - readyAt.current : null, audioMs: null });
+    setLiveNotice(kind === 'important' ? tr('已标为重点。') : kind === 'unclear' ? tr('已标为没听懂。') : tr('已标为作业。'));
+  }
   async function toggleFullscreen() {
     const node = stageRef.current?.parentElement;
     if (!node) return;
@@ -601,6 +675,7 @@ function App() {
   const visibleCaptions = segments.slice(hiddenCaptions, captionEnd);
   const routeSessionId = sessionIdFromPath(path);
   const rejoin = Boolean(routeSessionId && conflictSession?.id === routeSessionId && sessionStatus === 'idle');
+  if (path === '/help' || path === '/en/help') return <HelpPage />;
   if (path === '/privacy' || path === '/en/privacy') return <LegalPage kind="privacy" />;
   if (path === '/terms' || path === '/en/terms') return <LegalPage kind="terms" />;
   const shareToken = path.match(/^\/s\/([^/]+)\/?$/)?.[1];
@@ -630,6 +705,9 @@ function App() {
     routeEnded && routeEnded.id === routeSessionId && sessionStatus === 'idle' ? { id: 'route-ended', node: <div className="session-saved" role="status"><span>{tr('这场翻译已经结束，无法恢复。')}</span>{routeEnded.transcriptId && <button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(routeEnded.transcriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button>}<button type="button" className="link-button" onClick={() => replacePath('/')}>{tr('回到工作区')}</button></div> } : null,
     conflictSession && sessionStatus === 'idle' ? { id: 'conflict', node: <div className="record-notice" role="status"><p>{tr('上一场翻译还在占用额度。')}</p><button type="button" className="primary-button" onClick={() => void resumeConflict()}>{tr('恢复这场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(false)}>{tr('结束上一场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(true)}>{tr('结束上一场并开始')}</button></div> } : null,
     endedTranscriptId && sessionStatus === 'idle' ? { id: 'saved', node: <div className="session-saved" role="status"><span>{savedNote || tr('本次记录已保存。')}</span><button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(endedTranscriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button><button type="button" className="link-button" onClick={() => { setEndedTranscriptId(null); setSavedNote(''); }}>{tr('关闭')}</button></div> } : null,
+    sessionLive && savedThrough ? { id: 'checkpoint', node: <div className="session-saved" role="status"><span>{saveState === 'failed' ? tr('保存失败') : tr('已保存到 {time}').replace('{time}', new Date(savedThrough).toLocaleTimeString())}</span><span className="list-item-actions"><button type="button" className="link-button" onClick={() => addMarker('important')}>{tr('重点')}</button><button type="button" className="link-button" onClick={() => addMarker('unclear')}>{tr('没听懂')}</button><button type="button" className="link-button" onClick={() => addMarker('assignment')}>{tr('作业')}</button></span></div> } : null,
+    sessionLive ? { id: 'marks', node: <div className="session-saved" role="group" aria-label={tr('课堂标记')}><button type="button" className="link-button" onClick={() => addMarker('important')}>{tr('重点')}</button><button type="button" className="link-button" onClick={() => addMarker('unclear')}>{tr('没听懂')}</button><button type="button" className="link-button" onClick={() => addMarker('assignment')}>{tr('作业')}</button></div> } : null,
+    sessionStatus === 'idle' && authenticated ? { id: 'courses', node: <CourseBar disabled={busySession} languageA={languageA} languageB={languageB} onStart={(course) => void start(course)} /> } : null,
     !recordAck && recordAudio && sessionStatus === 'idle' ? { id: 'record-ack', node: <div className="record-notice" role="status"><p>{tr('录音默认开启。本次语音会保存到你的字幕库，只有你可以回放和删除。如果不需要保存，请先关闭「保存本次语音」。')}</p><button type="button" className="secondary-button" onClick={() => { localStorage.setItem('linguaflow_record_ack', '1'); setRecordAck(true); }}>{tr('知道了')}</button></div> } : null,
     showGuide && sessionStatus === 'idle' && !conflictSession && !routeEnded ? { id: 'guide', node: <FirstRun pair={currentLabel} plan={entitlement?.plan.toUpperCase() ?? 'FREE'} minutesLeft={entitlement ? (usableSeconds(entitlement) >= Number.MAX_SAFE_INTEGER / 2 ? tr('无限') : `${Math.ceil(usableSeconds(entitlement) / 60)} ${tr('分钟')}`) : '…'} onOpen={() => { if (!phone) setDockOpen(true); }} onDone={() => setShowGuide(false)} /> } : null,
     liveNotice ? { id: 'live-notice', node: <p className="live-notice" role="status">{liveNotice}</p> } : null

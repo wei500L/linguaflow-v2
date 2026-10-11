@@ -128,7 +128,7 @@ export function ControlDock(props: ControlDockProps) {
   const primaryLabel = sessionStatus === 'opening' ? tr('正在打开麦克风…')
     : sessionStatus === 'connecting' ? tr('连接中…')
     : sessionStatus === 'reconnecting' ? tr('正在恢复…')
-    : sessionStatus === 'stopping' ? tr('结束中…')
+    : sessionStatus === 'stopping' || sessionStatus === 'saving' ? tr('正在保存记录…')
     : closePrompt ? tr('保存并结束')
     : running ? tr('结束翻译')
     : rejoin ? tr('继续这场翻译')
