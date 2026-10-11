@@ -10,7 +10,7 @@ import { holdFreeDevice, remainingSeconds } from '../lib/quota.js';
 import { PLANS } from '@linguaflow/shared';
 import { audienceReveal, newAudienceToken, revokeAudienceShare } from '../lib/audience.js';
 import { audienceCount, closeActiveSession, dropAudience, handleRealtimeSocket, holdSession } from '../realtime/proxy.js';
-import { finalizePersistedSession } from '../realtime/persist.js';
+import { finalizePersistedSession, rememberGap, rememberMarker } from '../realtime/persist.js';
 import { glossaryInjection, sameLanguageResponse, type GlossaryMeta, type SonioxSessionInput } from '../realtime/soniox.js';
 import { socketUrl } from '../lib/socket-url.js';
 
@@ -193,6 +193,41 @@ export async function realtimeRoutes(app: FastifyInstance) {
     const token = protocols[1];
     if (!token) return socket.close(1008, 'Missing session token');
     await handleRealtimeSocket(socket, token);
+  });
+
+  app.post('/v1/realtime/sessions/:id/controls', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      items: z.array(z.object({
+        type: z.enum(['marker', 'gap']),
+        id: z.string().uuid(),
+        kind: z.enum(['important', 'unclear', 'assignment']).optional(),
+        source: z.enum(['user_pause', 'system_suspend', 'reconnect', 'queue_overflow', 'dropped']).optional(),
+        note: z.string().max(500).nullable().optional(),
+        wallMs: z.number().nullable().optional(),
+        audioMs: z.number().nullable().optional(),
+        wallStartMs: z.number().nullable().optional(),
+        wallEndMs: z.number().nullable().optional(),
+        audioStartMs: z.number().nullable().optional(),
+        audioEndMs: z.number().nullable().optional(),
+        precision: z.enum(['exact', 'estimated', 'unknown']).optional()
+      })).max(40)
+    }).parse(request.body);
+    const [session] = await db.select({ id: realtimeSessions.id, endReason: realtimeSessions.endReason }).from(realtimeSessions).where(and(eq(realtimeSessions.id, id), eq(realtimeSessions.userId, userId)));
+    if (!session || session.endReason === 'purged') return reply.code(404).send({ message: '找不到这场翻译。' });
+    const saved: string[] = [];
+    for (const item of body.items) {
+      if (item.type === 'marker' && item.kind) {
+        const ok = await rememberMarker({ id: item.id, userId, sessionId: id, kind: item.kind, note: item.note, wallMs: item.wallMs, audioMs: item.audioMs });
+        if (ok) saved.push(item.id);
+      }
+      if (item.type === 'gap' && item.source && item.precision) {
+        const ok = await rememberGap(id, { id: item.id, source: item.source, wallStartMs: item.wallStartMs ?? null, wallEndMs: item.wallEndMs ?? null, audioStartMs: item.audioStartMs ?? null, audioEndMs: item.audioEndMs ?? null, precision: item.precision });
+        if (ok) saved.push(item.id);
+      }
+    }
+    return { saved };
   });
 
   app.delete('/v1/realtime/sessions/:id', { preHandler: app.authenticate }, async (request, reply) => {

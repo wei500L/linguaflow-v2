@@ -15,6 +15,7 @@ import { signAudioPlayback, verifyAudioPlayback, verifyShareAudio } from '../lib
 import { resolveRecording } from '../lib/recordings.js';
 import { shareIsActive } from '../lib/shares.js';
 import { hardDeleteTranscripts, restoreTranscripts, softDeleteTranscripts } from '../lib/trash.js';
+import { renameLiveRoom } from '../realtime/proxy.js';
 import { cancelSummary, markSummaryStale, quoteSummary, restoreNoteVersion, saveHumanNote, startSummary, SUMMARY_TEMPLATES, summarySourceHash } from '../summary/jobs.js';
 import type { SummaryTemplate } from '../summary/pipeline.js';
 
@@ -205,7 +206,7 @@ export async function transcriptRoutes(app: FastifyInstance) {
     return {
       ...transcript,
       audioPlaybackToken: playable && transcript.audioRelPath ? signAudioPlayback(transcript.id, userId) : null,
-      summaryStale: Boolean(transcript.summarySourceHash && transcript.summarySourceHash !== hash),
+      summaryStale: !transcript.summaryCitationsVerified || Boolean(transcript.summarySourceHash && transcript.summarySourceHash !== hash),
       summaryQuoteSeconds: summaryChargeSeconds(charCount, unlimited),
       segments,
       tasks
@@ -251,6 +252,10 @@ export async function transcriptRoutes(app: FastifyInstance) {
     if (!Object.keys(patch).length) return reply.code(400).send({ message: '没有要保存的内容。' });
     const [updated] = await db.update(transcripts).set(patch).where(and(eq(transcripts.id, id), eq(transcripts.userId, userId))).returning();
     if (!updated) return reply.code(404).send({ message: 'Transcript not found' });
+    if (body.title && updated.sessionId && updated.recordStatus === 'active') {
+      await db.update(realtimeSessions).set({ title: body.title }).where(and(eq(realtimeSessions.id, updated.sessionId), eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt)));
+      renameLiveRoom(updated.sessionId, body.title);
+    }
     return updated;
   });
 
@@ -390,8 +395,16 @@ export async function transcriptRoutes(app: FastifyInstance) {
       return reply.code(206).type(type).send(createReadStream(full, { start, end }));
     }
     reply.header('content-length', info.size);
-    await recordEvent({ userId, name: 'audio_playback_started', dedupeKey: `audio_playback:${id}:${userId}`, props: { transcriptId: id, sessionId: transcript.sessionId } });
     return reply.type(type).send(createReadStream(full));
+  });
+
+  app.post('/v1/transcripts/:id/playback', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const { id } = request.params as { id: string };
+    const transcript = await ownedTranscript(userId, id);
+    if (!transcript) return reply.code(404).send({ message: 'Transcript not found' });
+    await recordEvent({ userId, name: 'audio_playback_started', dedupeKey: `audio_playback:${id}:${userId}`, props: { transcriptId: id, sessionId: transcript.sessionId } });
+    return { ok: true };
   });
 
   app.get('/v1/transcripts/:id/export', { preHandler: app.authenticate }, async (request, reply) => {
@@ -403,7 +416,7 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, id)).orderBy(transcriptSegments.idx);
     const zone = query.tz && isIanaTimeZone(query.tz) ? query.tz : null;
     await sendTranscriptFile(reply, await meetingDocument(transcript, segments, zone), query.format, query.scope);
-    await recordEvent({ userId, name: 'export_succeeded', dedupeKey: `export:${id}:${query.format}:${userId}:${Math.floor(Date.now() / 60_000)}`, props: { transcriptId: id, sessionId: transcript.sessionId } });
+    if (reply.statusCode < 400) await recordEvent({ userId, name: 'export_succeeded', dedupeKey: `export:${id}:${query.format}:${userId}:${Math.floor(Date.now() / 60_000)}`, props: { transcriptId: id, sessionId: transcript.sessionId } });
   });
 
   app.get('/v1/transcripts/:id/markers', { preHandler: app.authenticate }, async (request, reply) => {

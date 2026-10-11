@@ -22,7 +22,7 @@ export async function softDeleteTranscripts(userId: string, ids: string[]) {
       if (live) await endLiveSession(live.id);
       dropAudience(row.sessionId);
     }
-    if (row.summaryStatus === 'running') await refundSummaryUsage(userId, row.id);
+    await refundSummaryUsage(userId, row.id);
     await db.update(transcriptShares).set({ revokedAt: now }).where(and(eq(transcriptShares.transcriptId, row.id), isNull(transcriptShares.revokedAt)));
     await db.update(transcripts).set({ deletedAt: now, purgeAfter: new Date(now.getTime() + TRASH_RETAIN_MS), summaryStatus: row.summaryStatus === 'running' ? 'failed' : row.summaryStatus }).where(and(eq(transcripts.id, row.id), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
   }
@@ -39,7 +39,7 @@ export async function hardDeleteTranscripts(userId: string, ids: string[]) {
   if (!ids.length) return 0;
   const rows = await db.select().from(transcripts).where(and(eq(transcripts.userId, userId), inArray(transcripts.id, ids)));
   for (const row of rows) {
-    if (row.summaryStatus === 'running' || row.summaryStatus === 'cancelling') await refundSummaryUsage(userId, row.id);
+    await refundSummaryUsage(userId, row.id);
     if (row.sessionId) {
       const [live] = await db.select({ id: realtimeSessions.id }).from(realtimeSessions).where(and(eq(realtimeSessions.id, row.sessionId), isNull(realtimeSessions.endedAt)));
       if (live) await endLiveSession(live.id);

@@ -204,6 +204,11 @@ function App() {
     const timer = window.setInterval(tick, 250);
     return () => window.clearInterval(timer);
   }, [sessionLive, paused, audioStalled]);
+  useEffect(() => {
+    if (!sessionLive) return;
+    const timer = window.setInterval(() => flushControls(), 4_000);
+    return () => window.clearInterval(timer);
+  }, [sessionLive]);
   useEffect(() => { if (!authenticated) return; let alive = true; api<Glossary[]>('/v1/me/glossaries').then((rows) => { if (!alive) return; setGlossaryChoices(rows); if (glossaryId && !rows.some((row) => row.id === glossaryId)) setGlossaryId(''); }).catch(() => undefined); return () => { alive = false; }; }, [authenticated, panel]);
   function rememberCaptionLimit(next: number) {
     captionLimitRef.current = next;
@@ -334,21 +339,32 @@ function App() {
           return;
         }
         if (data.type === 'marker_ack' || data.type === 'gap_ack') {
-          const label = controlLabels.current.get(data.id);
-          controlLabels.current.delete(data.id);
-          if (data.type === 'gap_ack' && data.ok && label) setLiveGaps((current) => current.includes(label) ? current : [...current, label]);
+          const held = awaitingAck.current.get(data.id);
+          if (data.ok) {
+            awaitingAck.current.delete(data.id);
+            if (data.type === 'gap_ack' && held) setLiveGaps((current) => current.includes(held.label) ? current : [...current, held.label]);
+            if (awaitingAck.current.size === 0) setAckFailed(false);
+          } else setAckFailed(true);
+          publishUnsaved();
           setLiveNotice(data.ok ? (data.type === 'marker_ack' ? tr('标记已保存。') : tr('缺口已记录。')) : tr('没有保存成功，请再试一次。'));
           return;
         }
         if (data.type === 'ready') {
-          if (wallOrigin.current == null) wallOrigin.current = Date.now();
+          if (wallOrigin.current == null) {
+            if (typeof data.startedAtMs === 'number') wallOrigin.current = data.startedAtMs;
+            else if (sentAudioMs.current === 0) wallOrigin.current = Date.now();
+          }
           if (typeof data.allowedSeconds === 'number') { limitSeconds.current = data.allowedSeconds; readyAt.current = Date.now(); }
-          if (typeof data.receivedAudioMs === 'number') alignSentAudio(latencyClock.current, data.receivedAudioMs);
+          if (typeof data.receivedAudioMs === 'number') {
+            alignSentAudio(latencyClock.current, data.receivedAudioMs);
+            if (data.receivedAudioMs > sentAudioMs.current) sentAudioMs.current = data.receivedAudioMs;
+          }
           if (!sessionReady.current) startMeasuring(latencyClock.current, performance.now());
           sessionReady.current = true;
           acceptAudio.current = true;
           const queued = pendingControls.current.splice(0);
-          for (const item of queued) ws.send(JSON.stringify(item));
+          for (const item of queued) awaitingAck.current.set(String(item.id ?? crypto.randomUUID()), { payload: item, label: tr('标记') });
+          flushControls();
           pumpAudio(ws);
           if (keepalive.current !== null) window.clearInterval(keepalive.current);
           keepalive.current = window.setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'keepalive' })); }, 10_000);
@@ -467,7 +483,7 @@ function App() {
     setAudioStalled(false);
     speakerNamesRef.current = {};
     setSpeakerNames({}); setNamingSpeaker(null); setLiveNotice(''); setClosePrompt(false); closeTitleRef.current = sessionTitle.trim().slice(0, 120);
-    showProblem(''); setSavedNote(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; latencyClock.current = createLatencyClock(); setLatency(NO_LATENCY); savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null; wallOrigin.current = null; sentAudioMs.current = 0; pendingControls.current = []; latencySamples.current = emptyLatencySamples(); setLiveGaps([]);
+    showProblem(''); setSavedNote(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; latencyClock.current = createLatencyClock(); setLatency(NO_LATENCY); savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null; wallOrigin.current = null; sentAudioMs.current = 0; pendingControls.current = []; awaitingAck.current.clear(); setUnsavedControls([]); setAckFailed(false); latencySamples.current = emptyLatencySamples(); setLiveGaps([]);
     updateSessionStatus('opening');
     try {
       if (!await ensureAudio(id)) return;
@@ -546,9 +562,21 @@ function App() {
       drain.current = null;
     }
     ++generation.current;
+    flushControls();
+    await new Promise((resolve) => window.setTimeout(resolve, 1_200));
     socket.current = null;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close();
     const id = sessionId.current; sessionId.current = null;
+    if (id && awaitingAck.current.size && getToken()) {
+      const items = [...awaitingAck.current.values()].map((item) => item.payload);
+      try {
+        const saved = await api<{ saved: string[] }>(`/v1/realtime/sessions/${id}/controls`, { method: 'POST', body: JSON.stringify({ items }) });
+        for (const savedId of saved.saved ?? []) awaitingAck.current.delete(savedId);
+        publishUnsaved();
+        if (awaitingAck.current.size === 0) setAckFailed(false);
+      } catch { setAckFailed(true); }
+    }
+    const unsavedLabels = [...awaitingAck.current.values()].map((item) => item.label);
     const latencyProps = latencySampleProps(latencySamples.current);
     latencySamples.current = emptyLatencySamples();
     if (id && latencyProps && getToken()) void api('/v1/events', { method: 'POST', body: JSON.stringify({ name: 'latency_sample', dedupeKey: `latency:${id}`, props: { sessionId: id, ...latencyProps } }) }).catch(() => undefined);
@@ -571,10 +599,11 @@ function App() {
     closeTitleRef.current = '';
     setLiveSessionId(null);
     replacePath('/');
-    if (outcome === 'failed' || (confirmed?.saveStatus === 'failed' && !saved)) showProblem(tr('保存失败。已收到的字幕没有完整写入，请重试确认。'));
-    else if (!saved) setSavedNote(tr('这次没有可保存的内容。'));
-    else if (outcome === 'partial' || confirmed?.recordStatus === 'incomplete') setSavedNote(tr('记录已部分保存，并标为中断。'));
-    else setSavedNote(tr('记录已保存。'));
+    const pendingNote = unsavedLabels.length ? ` ${tr('还有 {count} 项标记或缺口没有保存。').replace('{count}', String(unsavedLabels.length))}` : '';
+    if (outcome === 'failed' || (confirmed?.saveStatus === 'failed' && !saved)) { showProblem(tr('保存失败。已收到的字幕没有完整写入，请重试确认。')); if (pendingNote) setSavedNote(pendingNote.trim()); }
+    else if (!saved) setSavedNote(`${tr('这次没有可保存的内容。')}${pendingNote}`);
+    else if (outcome === 'partial' || confirmed?.recordStatus === 'incomplete') setSavedNote(`${tr('记录已部分保存，并标为中断。')}${pendingNote}`);
+    else setSavedNote(`${tr('记录已保存。')}${pendingNote}`);
     if (saved) { setEndedTranscriptId(saved); setSessionTitle(''); }
   }
   function requestClose() {
@@ -669,16 +698,28 @@ function App() {
   const wallOrigin = useRef<number | null>(null);
   const sentAudioMs = useRef(0);
   const pendingControls = useRef<Array<Record<string, unknown>>>([]);
-  const controlLabels = useRef(new Map<string, string>());
+  const awaitingAck = useRef(new Map<string, { payload: Record<string, unknown>; label: string }>());
+  const [unsavedControls, setUnsavedControls] = useState<string[]>([]);
+  const [ackFailed, setAckFailed] = useState(false);
   const suspendStarted = useRef<number | null>(null);
   function wallClock() { return wallOrigin.current == null ? null : Date.now() - wallOrigin.current; }
+  function publishUnsaved() {
+    setUnsavedControls([...awaitingAck.current.values()].map((item) => item.label));
+  }
+  function flushControls() {
+    const socketOpen = socket.current?.readyState === WebSocket.OPEN ? socket.current : null;
+    if (!socketOpen) return;
+    for (const item of awaitingAck.current.values()) socketOpen.send(JSON.stringify(item.payload));
+  }
   function sendControl(payload: Record<string, unknown>) {
-    if (payload.type === 'gap' && typeof payload.id === 'string') {
-      const source = payload.source === 'user_pause' ? tr('主动暂停') : payload.source === 'system_suspend' ? tr('系统暂停') : tr('内容缺口');
-      controlLabels.current.set(payload.id, source);
-    }
+    const id = typeof payload.id === 'string' ? payload.id : crypto.randomUUID();
+    payload.id = id;
+    const label = payload.type === 'marker'
+      ? tr('标记')
+      : payload.source === 'user_pause' ? tr('主动暂停') : payload.source === 'system_suspend' ? tr('系统暂停') : tr('内容缺口');
+    awaitingAck.current.set(id, { payload, label });
+    publishUnsaved();
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(payload));
-    else pendingControls.current.push(payload);
   }
   function closeOpenPause() {
     if (pauseStarted.current == null) return;
@@ -750,7 +791,7 @@ function App() {
     sessionStatus === 'idle' && authenticated ? { id: 'courses', node: <CourseBar disabled={busySession} languageA={languageA} languageB={languageB} recordAudio={recordAudio} glossaryId={glossaryId} onStart={(course) => void start(course)} /> } : null,
     !recordAck && recordAudio && sessionStatus === 'idle' ? { id: 'record-ack', node: <div className="record-notice" role="status"><p>{tr('录音默认开启。本次语音会保存到你的字幕库，只有你可以回放和删除。如果不需要保存，请先关闭「保存本次语音」。')}</p><button type="button" className="secondary-button" onClick={() => { localStorage.setItem('linguaflow_record_ack', '1'); setRecordAck(true); }}>{tr('知道了')}</button></div> } : null,
     showGuide && sessionStatus === 'idle' && !conflictSession && !routeEnded ? { id: 'guide', node: <FirstRun pair={currentLabel} plan={entitlement?.plan.toUpperCase() ?? 'FREE'} minutesLeft={entitlement ? (usableSeconds(entitlement) >= Number.MAX_SAFE_INTEGER / 2 ? tr('无限') : `${Math.ceil(usableSeconds(entitlement) / 60)} ${tr('分钟')}`) : '…'} onOpen={() => { if (!phone) setDockOpen(true); }} onDone={() => setShowGuide(false)} /> } : null,
-    liveNotice ? { id: 'live-notice', node: <p className="live-notice" role="status">{liveNotice}</p> } : null
+    liveNotice ? { id: 'live-notice', node: <p className="live-notice" role="status">{liveNotice}{unsavedControls.length > 0 ? ` ${unsavedControls.join('、')}` : ''}{ackFailed ? <button type="button" className="link-button" onClick={() => flushControls()}>{tr('再试一次')}</button> : null}</p> } : null
   ];
 
   return <div className="app-shell">

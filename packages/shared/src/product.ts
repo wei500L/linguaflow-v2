@@ -229,10 +229,35 @@ export function languageRelation(mode: string, languageA: string, languageB: str
   return mode === 'two_way' ? `${languageA} ↔ ${languageB}` : `${languageA} → ${languageB}`;
 }
 
-export function citationState(segmentId: string, snapshotHash: string | undefined, current: { source: string } | undefined) {
+export function citationState(segmentId: string, snapshotHash: string | undefined, current: { source: string } | undefined, verified = true) {
   if (!current) return 'missing' as const;
+  if (!verified) return 'unverified' as const;
   if (!snapshotHash || snapshotHash === sourceHash(current.source)) return 'ok' as const;
   return 'changed' as const;
+}
+
+/** A held summary charge is settled only when this request already wrote the note. An older ready note does not count. */
+export function summaryHoldRecovery(input: {
+  requestStatus: string | null;
+  requestHash: string | null;
+  requestCreatedAtMs: number | null;
+  transcriptStatus: string | null;
+  sourceHash: string | null;
+  generatedAtMs: number | null;
+}) {
+  const produced = input.requestStatus === 'running'
+    && input.transcriptStatus === 'ready'
+    && input.sourceHash != null
+    && input.sourceHash === input.requestHash
+    && input.generatedAtMs != null
+    && input.requestCreatedAtMs != null
+    && input.generatedAtMs >= input.requestCreatedAtMs;
+  return produced ? 'settle' as const : 'refund' as const;
+}
+
+/** A lost success can be replayed. A failed or cancelled confirmation has to start again. */
+export function summaryReplay(status: string) {
+  return status === 'ready' || status === 'running' ? 'return' as const : 'restart' as const;
 }
 
 const SEGMENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
@@ -315,7 +340,7 @@ export type RichInline =
   | { type: 'strong'; text: string }
   | { type: 'code'; text: string }
   | { type: 'link'; href: string; text: string }
-  | { type: 'cite'; segmentId: string; state: 'ok' | 'changed' | 'missing' }
+  | { type: 'cite'; segmentId: string; state: 'ok' | 'changed' | 'missing' | 'unverified' }
   | { type: 'math'; source: string; text: string; ok: boolean };
 
 export type RichBlock =
@@ -324,7 +349,7 @@ export type RichBlock =
   | { type: 'list'; items: RichInline[][] }
   | { type: 'code'; text: string };
 
-function parseInlines(line: string, cite: (id: string) => 'ok' | 'changed' | 'missing'): RichInline[] {
+function parseInlines(line: string, cite: (id: string) => 'ok' | 'changed' | 'missing' | 'unverified'): RichInline[] {
   const inlines: RichInline[] = [];
   const pattern = /\[\[seg:([0-9a-f-]{36})\]\]|\[([^\]]+)\]\((https?:\/\/[^)\s]+)\)|\*\*([^*]+)\*\*|`([^`]+)`|\$\$([^$]+)\$\$|\$([^$\n]+)\$/gi;
   let cursor = 0;
@@ -346,7 +371,7 @@ function parseInlines(line: string, cite: (id: string) => 'ok' | 'changed' | 'mi
   return inlines.length ? inlines : [{ type: 'text', text: line }];
 }
 
-export function parseSafeMarkdown(markdown: string, cite: (id: string) => 'ok' | 'changed' | 'missing' = () => 'missing'): RichBlock[] {
+export function parseSafeMarkdown(markdown: string, cite: (id: string) => 'ok' | 'changed' | 'missing' | 'unverified' = () => 'missing'): RichBlock[] {
   const blocks: RichBlock[] = [];
   const lines = markdown.replace(/\r\n/g, '\n').split('\n');
   let paragraph: string[] = [];
@@ -545,12 +570,23 @@ export function summarizeProductMetrics(events: MetricEvent[], fromMs: number, t
       firstCaption: { numerator: idsFor(rows, 'session_first_caption').size, denominator: idsFor(rows, 'session_start_attempted').size, unknown: Math.max(0, attempted - ready), basis: 'sessions' },
       persisted: { numerator: idsFor(rows, 'record_finished').size, denominator: idsFor(rows, 'record_finished').size + idsFor(rows, 'record_failed').size + idsFor(rows, 'record_recovered').size, unknown: 0, basis: 'sessions' },
       gaps: { numerator: [...idsFor(rows, 'audio_gap')].filter((id) => idsFor(rows, 'record_finished').has(id) || idsFor(rows, 'record_recovered').has(id)).length, denominator: idsFor(rows, 'record_finished').size + idsFor(rows, 'record_recovered').size, unknown: 0, basis: 'sessions_with_a_gap', gapEvents: gaps },
-      afterClass: {
-        numerator: [...idsFor(rows, 'record_finished')].filter((id) => idsFor(rows, 'record_opened').has(id) || idsFor(rows, 'audio_playback_started').has(id) || idsFor(rows, 'export_succeeded').has(id) || idsFor(rows, 'summary_succeeded').has(id)).length,
-        denominator: idsFor(rows, 'record_finished').size,
-        unknown: 0,
-        basis: 'finished_sessions'
-      },
+      afterClass: (() => {
+        const finishedAt = new Map<string, number>();
+        for (const event of rows) {
+          if (event.name !== 'record_finished' || typeof event.props.sessionId !== 'string') continue;
+          const id = event.props.sessionId;
+          const at = finishedAt.get(id);
+          if (at == null || event.createdAtMs < at) finishedAt.set(id, event.createdAtMs);
+        }
+        const used = new Set<string>();
+        for (const event of rows) {
+          if (!['record_opened', 'audio_playback_started', 'export_succeeded', 'summary_succeeded'].includes(event.name)) continue;
+          if (typeof event.props.sessionId !== 'string') continue;
+          const ended = finishedAt.get(event.props.sessionId);
+          if (ended != null && event.createdAtMs >= ended) used.add(event.props.sessionId);
+        }
+        return { numerator: used.size, denominator: finishedAt.size, unknown: 0, basis: 'finished_sessions_after_end' };
+      })(),
       onboarding: { numerator: count('onboarding_completed'), denominator: count('onboarding_started'), unknown: 0, basis: 'guide' },
       reused: (() => {
         const byUser = new Map<string, number>();

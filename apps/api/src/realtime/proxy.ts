@@ -112,6 +112,12 @@ export function dropAudience(sessionId: string) {
   room.audience.clear();
 }
 
+export function renameLiveRoom(sessionId: string, title: string) {
+  const room = rooms.get(sessionId);
+  if (!room || room.ended) return;
+  room.title = title.trim().slice(0, 120);
+}
+
 export function holdSession(sessionId: string) {
   const room = rooms.get(sessionId);
   if (!room || room.ended || room.stopRequested) return false;
@@ -288,7 +294,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     upstreamKeepalive.unref();
     const allowed = room.allowed;
     room.startedAt = startedAt;
-    sendJson(hostSocket(), { type: 'ready', sessionId: session.id, allowedSeconds: allowed });
+    sendJson(hostSocket(), { type: 'ready', sessionId: session.id, allowedSeconds: allowed, startedAtMs: startedAt?.getTime() });
     limitTimer = setTimeout(() => {
       const code = allowed < session.maxSessionSeconds ? 'quota_exhausted' : 'session_limit_reached';
       sendJson(hostSocket(), { type: 'error', code });
@@ -428,7 +434,7 @@ export async function handleReconnectSocket(client: WebSocket, token: string) {
   room.bindClient(client);
   const elapsed = room.startedAt ? Math.floor((Date.now() - room.startedAt.getTime()) / 1000) : 0;
   if (client.readyState === client.OPEN) {
-    client.send(JSON.stringify({ type: 'ready', sessionId: session.id, allowedSeconds: Math.max(0, room.allowed - elapsed), receivedAudioMs: room.forwardedAudioBytes / (PCM_BYTES_PER_SECOND / 1000) }));
+    client.send(JSON.stringify({ type: 'ready', sessionId: session.id, allowedSeconds: Math.max(0, room.allowed - elapsed), receivedAudioMs: room.forwardedAudioBytes / (PCM_BYTES_PER_SECOND / 1000), startedAtMs: room.startedAt?.getTime() ?? session.startedAt?.getTime() }));
     client.send(JSON.stringify({ type: 'snapshot', tokens: room.finalTokens, speakerNames: room.speakerNames }));
   }
 }

@@ -23,6 +23,8 @@ import {
   sharesRevivedOnRestore,
   shouldRecordReconnectGap,
   shouldRecoverSession,
+  summaryHoldRecovery,
+  summaryReplay,
   sourceHash,
   summarizeProductMetrics,
   summaryInputHash,
@@ -166,6 +168,42 @@ test('math inequalities survive markdown cleaning', () => {
   assert.match(cleaned, /\$a < b\$/);
   assert.match(cleaned, /\$c > d\$/);
   assert.equal(cleaned.includes('script'), false);
+});
+
+test('a held summary is refunded unless this request already wrote the note', () => {
+  assert.equal(summaryHoldRecovery({
+    requestStatus: 'running',
+    requestHash: 'hash-b',
+    requestCreatedAtMs: 2_000,
+    transcriptStatus: 'ready',
+    sourceHash: 'hash-a',
+    generatedAtMs: 1_000
+  }), 'refund');
+  assert.equal(summaryHoldRecovery({
+    requestStatus: 'running',
+    requestHash: 'hash-b',
+    requestCreatedAtMs: 2_000,
+    transcriptStatus: 'ready',
+    sourceHash: 'hash-b',
+    generatedAtMs: 2_500
+  }), 'settle');
+  assert.equal(summaryReplay('ready'), 'return');
+  assert.equal(summaryReplay('failed'), 'restart');
+  assert.equal(citationState('seg', 'other', { source: '原文 B' }, false), 'unverified');
+});
+
+test('after-class use only counts events after the session ends', () => {
+  const metrics = summarizeProductMetrics([
+    { name: 'record_opened', createdAtMs: 1, userId: 'u', props: { sessionId: 's1' } },
+    { name: 'record_finished', createdAtMs: 5, userId: 'u', props: { sessionId: 's1' } },
+    { name: 'record_opened', createdAtMs: 6, userId: 'u', props: { sessionId: 's1' } }
+  ], 0, 10);
+  assert.equal(metrics.rates.afterClass.numerator, 1);
+  const early = summarizeProductMetrics([
+    { name: 'record_opened', createdAtMs: 1, userId: 'u', props: { sessionId: 's1' } },
+    { name: 'record_finished', createdAtMs: 5, userId: 'u', props: { sessionId: 's1' } }
+  ], 0, 10);
+  assert.equal(early.rates.afterClass.numerator, 0);
 });
 
 test('after-class rate counts a session once', () => {

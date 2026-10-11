@@ -92,6 +92,13 @@
       "when": 1791711585275,
       "tag": "0012_product_completeness_round",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1791720000000,
+      "tag": "0013_note_citation_snapshot",
+      "breakpoints": true
     }
   ]
 }

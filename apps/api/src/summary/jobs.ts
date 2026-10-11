@@ -1,7 +1,7 @@
 import { and, desc, eq, inArray, isNull, sql } from 'drizzle-orm';
-import { sanitizeModelMarkdown, sourceHash, summaryInputHash, type SummarySegmentInput } from '@linguaflow/shared';
+import { sanitizeModelMarkdown, sourceHash, summaryHoldRecovery, summaryInputHash, summaryReplay, type SummarySegmentInput } from '@linguaflow/shared';
 import { db } from '../db/index.js';
-import { noteVersions, realtimeSessions, summaryProviders, summaryRequests, transcriptSegments, transcriptTasks, transcripts } from '../db/schema.js';
+import { noteVersions, realtimeSessions, summaryProviders, summaryRequests, transcriptSegments, transcriptTasks, transcripts, usageLedger } from '../db/schema.js';
 import { formatClock } from '../export/meeting.js';
 import { config } from '../config.js';
 import { assertFreeTranslation, latestUserDevice } from '../lib/device-store.js';
@@ -20,8 +20,32 @@ const inflight = new Map<string, Job>();
 const httpError = (statusCode: number, message: string, code?: string) => Object.assign(new Error(message), { statusCode, code });
 
 export async function markInterruptedSummaries() {
-  const rows = await db.select({ id: transcripts.id, userId: transcripts.userId }).from(transcripts).where(eq(transcripts.summaryStatus, 'running'));
-  await Promise.all(rows.map((row) => refundSummaryUsage(row.userId, row.id)));
+  const held = await db.select({ userId: usageLedger.userId, transcriptId: usageLedger.transcriptId }).from(usageLedger).where(and(eq(usageLedger.kind, 'summary'), eq(usageLedger.status, 'held')));
+  const seen = new Set<string>();
+  for (const row of held) {
+    if (!row.transcriptId) continue;
+    const key = `${row.userId}:${row.transcriptId}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const [request] = await db.select().from(summaryRequests).where(and(eq(summaryRequests.userId, row.userId), eq(summaryRequests.transcriptId, row.transcriptId), eq(summaryRequests.status, 'running'))).orderBy(desc(summaryRequests.createdAt)).limit(1);
+    const [transcript] = await db.select({
+      summaryStatus: transcripts.summaryStatus,
+      summarySourceHash: transcripts.summarySourceHash,
+      summaryGeneratedAt: transcripts.summaryGeneratedAt
+    }).from(transcripts).where(and(eq(transcripts.id, row.transcriptId), eq(transcripts.userId, row.userId)));
+    const action = summaryHoldRecovery({
+      requestStatus: request?.status ?? null,
+      requestHash: request?.inputHash ?? null,
+      requestCreatedAtMs: request?.createdAt.getTime() ?? null,
+      transcriptStatus: transcript?.summaryStatus ?? null,
+      sourceHash: transcript?.summarySourceHash ?? null,
+      generatedAtMs: transcript?.summaryGeneratedAt?.getTime() ?? null
+    });
+    if (action === 'settle' && request) {
+      await confirmSummaryUsage(row.userId, row.transcriptId);
+      await db.update(summaryRequests).set({ status: 'ready' }).where(and(eq(summaryRequests.id, request.id), eq(summaryRequests.status, 'running')));
+    } else await refundSummaryUsage(row.userId, row.transcriptId);
+  }
   await db.update(transcripts).set({ summaryStatus: 'failed', summaryError: '总结已中断。' }).where(eq(transcripts.summaryStatus, 'running'));
   await db.update(summaryRequests).set({ status: 'failed' }).where(eq(summaryRequests.status, 'running'));
 }
@@ -52,7 +76,11 @@ async function snapshotNote(userId: string, transcript: typeof transcripts.$infe
     template: transcript.summaryTemplate,
     inputVersion: transcript.summaryInputVersion,
     provider: transcript.summaryBilling,
-    body: transcript.summaryMarkdown
+    body: transcript.summaryMarkdown,
+    inputHash: transcript.summarySourceHash,
+    outputLanguage: transcript.summaryLanguage,
+    citationHashes: transcript.summaryCitationsVerified ? transcript.summaryCitationHashes : null,
+    sourceHash: transcript.summaryCitationsVerified ? transcript.summarySourceHash : null
   });
 }
 
@@ -88,11 +116,12 @@ async function runSummary(userId: string, transcriptId: string, template: Summar
       summaryEditedAt: null,
       summaryBilling: billing,
       summaryStale: false,
-      summaryCitationHashes: hashes
+      summaryCitationHashes: hashes,
+      summaryCitationsVerified: true
     }).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), eq(transcripts.summaryStatus, 'running'), eq(transcripts.noteEpoch, epoch), isNull(transcripts.deletedAt))).returning({ id: transcripts.id });
     if (updated) {
       await confirmSummaryUsage(userId, transcriptId);
-      await db.insert(noteVersions).values({ transcriptId, userId, authorType: 'ai', template, inputVersion: null, provider: billing, body: clean });
+      await db.insert(noteVersions).values({ transcriptId, userId, authorType: 'ai', template, inputVersion: null, provider: billing, body: clean, inputHash: hash, outputLanguage, citationHashes: hashes, sourceHash: hash });
       await db.update(summaryRequests).set({ status: 'ready' }).where(and(eq(summaryRequests.transcriptId, transcriptId), eq(summaryRequests.userId, userId), eq(summaryRequests.noteEpoch, epoch), eq(summaryRequests.status, 'running')));
       await syncSummaryTasks(transcriptId, clean);
       await recordEvent({ userId, name: 'summary_succeeded', dedupeKey: `summary_succeeded:${transcriptId}:${hash}:${epoch}`, props: { transcriptId, template, provider: billing } });
@@ -175,12 +204,14 @@ export async function startSummary(userId: string, transcriptId: string, templat
   const [existingRequest] = await db.select().from(summaryRequests).where(and(eq(summaryRequests.userId, userId), eq(summaryRequests.idempotencyKey, confirmation.idempotencyKey)));
   if (existingRequest) {
     if (existingRequest.transcriptId !== transcriptId || existingRequest.inputHash !== hash || existingRequest.provider !== provider || existingRequest.quoteSeconds !== expected || existingRequest.template !== template) throw httpError(409, '这次确认对应的内容和费用不一致。', 'quote_stale');
-    return { status: existingRequest.status, duplicate: true as const };
+    if (summaryReplay(existingRequest.status) === 'return') return { status: existingRequest.status, duplicate: true as const };
   }
   if (inflight.has(userId)) throw httpError(409, '已有一份纪要正在生成。');
   const controller = new AbortController();
   inflight.set(userId, { transcriptId, controller });
   let reserved = false;
+  let markedRunning = false;
+  const previousStatus = transcript.summaryStatus;
   try {
     let apiBase = '';
     let apiKey: string | undefined;
@@ -202,46 +233,50 @@ export async function startSummary(userId: string, transcriptId: string, templat
       model = saved.model;
     }
     const seen = device === undefined ? await recordedDevice(userId, transcript.sessionId) : device;
-    try {
-      await db.insert(summaryRequests).values({
-        userId,
-        transcriptId,
-        idempotencyKey: confirmation.idempotencyKey,
-        inputHash: hash,
-        inputVersion: confirmation.inputVersion,
-        provider,
-        template,
-        quoteSeconds: expected,
-        status: 'running',
-        noteEpoch: transcript.noteEpoch
-      });
-    } catch (error) {
-      const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
-      if (code !== '23505') throw error;
-      if (inflight.get(userId)?.controller === controller) inflight.delete(userId);
-      const [raced] = await db.select().from(summaryRequests).where(and(eq(summaryRequests.userId, userId), eq(summaryRequests.idempotencyKey, confirmation.idempotencyKey)));
-      return { status: raced?.status ?? 'running', duplicate: true as const };
-    }
-    if (provider === 'platform') {
-      if (entitlement.plan === 'free') await assertFreeTranslation(userId, seen);
-      await reserveQuotedSummary(userId, transcriptId, expected, seen);
-      reserved = true;
-    }
     await snapshotNote(userId, transcript);
     await db.transaction(async (tx) => {
       await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${userId})::bigint)`);
       const [busy] = await tx.select({ id: transcripts.id }).from(transcripts).where(and(eq(transcripts.userId, userId), eq(transcripts.summaryStatus, 'running'), isNull(transcripts.deletedAt)));
       if (busy && busy.id !== transcriptId) throw httpError(409, '已有一份纪要正在生成。');
+      if (existingRequest) {
+        await tx.update(summaryRequests).set({ status: 'running', inputHash: hash, inputVersion: confirmation.inputVersion, provider, template, quoteSeconds: expected, noteEpoch: transcript.noteEpoch }).where(eq(summaryRequests.id, existingRequest.id));
+      } else {
+        await tx.insert(summaryRequests).values({
+          userId,
+          transcriptId,
+          idempotencyKey: confirmation.idempotencyKey,
+          inputHash: hash,
+          inputVersion: confirmation.inputVersion,
+          provider,
+          template,
+          quoteSeconds: expected,
+          status: 'running',
+          noteEpoch: transcript.noteEpoch
+        });
+      }
       await tx.update(transcripts).set({ summaryStatus: 'running', summaryError: null, summaryTemplate: template, summaryLanguage: outputLanguage }).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
     });
+    markedRunning = true;
+    if (provider === 'platform') {
+      if (entitlement.plan === 'free') await assertFreeTranslation(userId, seen);
+      await reserveQuotedSummary(userId, transcriptId, expected, seen);
+      reserved = true;
+    }
     await recordEvent({ userId, name: 'summary_requested', dedupeKey: `summary_requested:${transcriptId}:${confirmation.idempotencyKey}`, props: { transcriptId, template, provider } });
     void runSummary(userId, transcriptId, template, outputLanguage, apiBase, apiKey, model, provider, entries, segments, hash, transcript.noteEpoch, controller).finally(() => {
       if (inflight.get(userId)?.controller === controller) inflight.delete(userId);
     });
     return { status: 'running' as const, duplicate: false as const };
   } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (code === '23505') {
+      if (inflight.get(userId)?.controller === controller) inflight.delete(userId);
+      const [raced] = await db.select().from(summaryRequests).where(and(eq(summaryRequests.userId, userId), eq(summaryRequests.idempotencyKey, confirmation.idempotencyKey)));
+      return { status: raced?.status ?? 'running', duplicate: true as const };
+    }
     if (reserved) await refundSummaryUsage(userId, transcriptId);
     await db.update(summaryRequests).set({ status: 'failed' }).where(and(eq(summaryRequests.userId, userId), eq(summaryRequests.idempotencyKey, confirmation.idempotencyKey), eq(summaryRequests.status, 'running'))).catch(() => undefined);
+    if (markedRunning) await db.update(transcripts).set({ summaryStatus: previousStatus === 'running' ? 'failed' : previousStatus, summaryError: null }).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), eq(transcripts.summaryStatus, 'running'))).catch(() => undefined);
     if (inflight.get(userId)?.controller === controller) inflight.delete(userId);
     throw error;
   }
@@ -261,7 +296,7 @@ export async function markSummaryStale(userId: string, transcriptId: string) {
   if (!row) return { stale: false as const };
   const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId)).orderBy(transcriptSegments.idx);
   const hash = summaryInputHash(segments);
-  const stale = Boolean(row.summaryMarkdown && row.summarySourceHash && row.summarySourceHash !== hash);
+  const stale = !row.summaryCitationsVerified || Boolean(row.summaryMarkdown && row.summarySourceHash && row.summarySourceHash !== hash);
   const inputVersion = stale ? row.summaryInputVersion + 1 : row.summaryInputVersion;
   await db.update(transcripts).set({ summaryStale: stale, summaryInputVersion: inputVersion }).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId)));
   return { stale, inputHash: hash, inputVersion };
@@ -270,17 +305,22 @@ export async function markSummaryStale(userId: string, transcriptId: string) {
 export async function saveHumanNote(userId: string, transcriptId: string, markdown: string) {
   const [row] = await db.select().from(transcripts).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
   if (!row) return null;
-  const segments = await db.select({ id: transcriptSegments.id }).from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId));
+  const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId));
   const clean = sanitizeModelMarkdown(markdown, new Set(segments.map((segment) => segment.id)), undefined, undefined, false);
+  const hashes = Object.fromEntries(segments.map((segment) => [segment.id, segment.sourceText ? sourceHash(segment.sourceText) : '']));
+  const source = summaryInputHash(segments);
   const [updated] = await db.update(transcripts).set({
     summaryMarkdown: clean,
     summaryStatus: 'ready',
     summaryError: null,
     summaryEditedAt: new Date(),
+    summaryCitationHashes: hashes,
+    summaryCitationsVerified: true,
+    summarySourceHash: source,
     noteEpoch: row.noteEpoch + 1
   }).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt))).returning();
   if (!updated) return null;
-  await db.insert(noteVersions).values({ transcriptId, userId, authorType: 'human', template: row.summaryTemplate, inputVersion: row.summaryInputVersion, provider: row.summaryBilling, body: clean });
+  await db.insert(noteVersions).values({ transcriptId, userId, authorType: 'human', template: row.summaryTemplate, inputVersion: row.summaryInputVersion, provider: row.summaryBilling, body: clean, inputHash: source, outputLanguage: row.summaryLanguage, citationHashes: hashes, sourceHash: source });
   return updated;
 }
 
@@ -289,16 +329,36 @@ export async function restoreNoteVersion(userId: string, transcriptId: string, v
   if (!version) return null;
   const [row] = await db.select().from(transcripts).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
   if (!row) return null;
+  const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId)).orderBy(transcriptSegments.idx);
+  const currentHash = summaryInputHash(segments);
+  const verified = version.citationHashes != null;
   const [updated] = await db.update(transcripts).set({
     summaryMarkdown: version.body,
     summaryStatus: 'ready',
     summaryError: null,
     summaryEditedAt: new Date(),
     summaryTemplate: version.template ?? row.summaryTemplate,
+    summaryLanguage: version.outputLanguage ?? row.summaryLanguage,
+    summarySourceHash: verified ? version.sourceHash : null,
+    summaryCitationHashes: verified ? version.citationHashes ?? {} : {},
+    summaryCitationsVerified: verified,
+    summaryStale: !verified || Boolean(version.sourceHash && version.sourceHash !== currentHash),
     noteEpoch: row.noteEpoch + 1
   }).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt))).returning();
   if (!updated) return null;
-  await db.insert(noteVersions).values({ transcriptId, userId, authorType: 'restore', template: version.template, inputVersion: version.inputVersion, provider: null, body: version.body });
+  await db.insert(noteVersions).values({
+    transcriptId,
+    userId,
+    authorType: 'restore',
+    template: version.template,
+    inputVersion: version.inputVersion,
+    provider: null,
+    body: version.body,
+    inputHash: version.inputHash,
+    outputLanguage: version.outputLanguage,
+    citationHashes: version.citationHashes,
+    sourceHash: version.sourceHash
+  });
   return updated;
 }
 

@@ -145,7 +145,13 @@ const english: Record<string, string> = {
   '课程': 'Course', '课程名称': 'Course name', '保存课程': 'Save course', '用这门课开始': 'Start this course', '修改课程': 'Edit course', '保存修改': 'Save changes', '课程已更新。下次开始会使用这些设置。': 'Course updated. The next start uses these settings.',
   '课程已保存。开始时会使用这门课的语言和课堂笔记。': 'Course saved. Starting it uses its languages and class notes.',
   '还没有课程。普通听课不需要先建课。': 'No courses yet. A normal class does not need one.',
-  '来源已变化': 'Source changed', '来源不可用': 'Source unavailable', '查看来源': 'Show source',
+  '来源已变化': 'Source changed', '来源不可用': 'Source unavailable', '来源无法验证': 'Source cannot be verified', '查看来源': 'Show source',
+  '公式未完整排版': 'Formula kept as written', '当前术语库': 'Glossary in use', '源语言': 'Source language', '目标语言': 'Target language',
+  '大约 {seconds} 秒': 'about {seconds} s', '{seconds} 秒': '{seconds} s',
+  '这次生成没有完成。请重新确认后再试。': 'This note was not created. Confirm again to try.',
+  '还有 {count} 项标记或缺口没有保存。': '{count} marks or gaps were not saved.',
+  '再试一次': 'Try again', '标记': 'Mark',
+  '笔记版本加载失败': 'Could not load note versions', '标记加载失败': 'Could not load marks', '恢复版本失败': 'Could not restore that version', '保存标记失败': 'Could not save the mark', '删除标记失败': 'Could not delete the mark',
   '暂无数据': 'No data yet', '产品指标': 'Product metrics', '已结束': 'Finished', '缺口': 'Gaps',
   '回收站': 'Trash', '返回字幕库': 'Back to transcripts', '已恢复。分享不会自动重新打开。': 'Restored. Sharing stays off until you turn it on again.', '恢复失败': 'Could not restore'
 };

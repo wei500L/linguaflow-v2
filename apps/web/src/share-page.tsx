@@ -4,7 +4,7 @@ import { PHONE_QUERY, useMediaQuery } from './lib/breakpoints';
 import { tr, useLang } from './lib/i18n';
 import { LanguageToggle } from './language-toggle';
 import { ThemeToggle } from './theme-toggle';
-import { renderSummary } from './transcript-panel';
+import { gapCaption, renderSummary } from './transcript-panel';
 
 type CaptionView = 'both' | 'translation' | 'source';
 type ShareSegment = { id: string; speaker: string | null; language?: string | null; sourceText: string; translationText: string; startMs: number | null; endMs?: number | null };
@@ -21,8 +21,9 @@ type ShareData = {
   summaryMarkdown: string | null;
   audioUrl: string | null;
   segments: ShareSegment[];
-  gaps?: Array<{ id: string; source: string; precision: string }>;
+  gaps?: Array<{ id: string; source: string; precision: string; wallStartMs?: number | null; wallEndMs?: number | null; audioStartMs?: number | null; audioEndMs?: number | null }>;
   summaryCitationHashes?: Record<string, string> | null;
+  summaryCitationsVerified?: boolean;
 };
 
 function formatClockMs(ms: number) {
@@ -200,9 +201,9 @@ export function SharePage({ token }: { token: string }) {
         {data.summaryMarkdown && <section>
         <h2>{tr('纪要')}</h2>
         {tasks.length > 0 && <div className="task-box"><div className="task-head"><strong>{tr('待办')}</strong><button type="button" className="link-button" onClick={() => { void navigator.clipboard.writeText(tasks.map((item) => `- ${item.done ? '[x] ' : ''}${item.text}`).join('\n')).then(() => setNotice(tr('待办已复制。'))).catch(() => setExportError(tr('当前浏览器不允许复制，请手动选择文本。'))); }}>{tr('复制待办')}</button></div>{tasks.map((task) => <label key={task.id}><input type="checkbox" checked={task.done} readOnly /><span>{task.text}</span></label>)}</div>}
-        <div className="summary-view">{renderSummary(data.summaryMarkdown, { segments: data.scope === 'summary' ? [] : data.segments, hashes: data.summaryCitationHashes, onSeek: data.scope === 'summary' ? undefined : (_id, startMs) => seekTo(startMs) })}</div>
+        <div className="summary-view">{renderSummary(data.summaryMarkdown, { segments: data.scope === 'summary' ? [] : data.segments, hashes: data.summaryCitationHashes, verified: data.summaryCitationsVerified !== false, onSeek: data.scope === 'summary' ? undefined : (_id, startMs) => seekTo(startMs) })}</div>
       </section>}
-      {data.gaps?.length ? <p className="share-meta">{data.gaps.map((gap) => `${gap.source === 'user_pause' ? tr('主动暂停') : tr('内容缺口')}（${gap.precision === 'unknown' ? tr('不确定') : gap.precision}）`).join(' · ')}</p> : null}
+      {data.gaps?.length ? <p className="share-meta">{data.gaps.map((gap) => gapCaption(gap)).join(' · ')}</p> : null}
       {!classroom && captionSection}
       {classroom && exportBlock}
     </section>}

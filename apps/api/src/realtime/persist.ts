@@ -1,6 +1,6 @@
 import crypto from 'node:crypto';
 import os from 'node:os';
-import { and, asc, eq, inArray, isNull, lt, or } from 'drizzle-orm';
+import { and, asc, eq, inArray, isNull, lt, or, sql } from 'drizzle-orm';
 import {
   billableSecondsFromCheckpoint,
   checkpointFailureAction,
@@ -92,7 +92,7 @@ export async function noteOwner(sessionId: string, status?: string) {
 
 export async function rememberGap(sessionId: string, gap: AudioGap) {
   const [session] = await db.select().from(realtimeSessions).where(eq(realtimeSessions.id, sessionId));
-  if (!session || session.endedAt) return false;
+  if (!session || session.endReason === 'purged') return false;
   const gaps = asGaps(session.gaps);
   if (gaps.some((item) => item.id === gap.id)) return true;
   const next = [...gaps, gap].slice(-200);
@@ -174,9 +174,11 @@ async function writeCheckpoint(input: {
     persistedHint = session.persistedTokenCount;
     const folded = foldCaptionTurns(input.finalTokens, [], false).filter((turn) => !turn.interim);
     const activeUntil = new Date();
+    const template = input.summaryTemplate ?? await templateFor(session.mode, session.courseId);
     let transcriptId: string | null = null;
     let nextSeq = session.checkpointSeq + 1;
     await db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('statement_timeout', '8000', true)`);
       const [locked] = await tx.select().from(realtimeSessions).where(eq(realtimeSessions.id, input.sessionId)).for('update');
       if (!locked || locked.endedAt || locked.endReason === 'purged') return;
       const [draft] = await tx.select({ deletedAt: transcripts.deletedAt }).from(transcripts).where(eq(transcripts.sessionId, input.sessionId)).limit(1);
@@ -187,7 +189,7 @@ async function writeCheckpoint(input: {
       if (fresh.length) {
         await tx.insert(sessionTokenChunks).values({ sessionId: input.sessionId, seq: persisted, tokens: fresh }).onConflictDoNothing();
       }
-      if (merged.length) transcriptId = await upsertDraft(tx, locked, merged, input, activeUntil, 'active', input.summaryTemplate ?? null);
+      if (merged.length) transcriptId = await upsertDraft(tx, locked, merged, input, activeUntil, 'active', template);
       nextSeq = locked.checkpointSeq + 1;
       await tx.update(realtimeSessions).set({
         persistedTokenCount: persisted + fresh.length,
@@ -230,11 +232,13 @@ async function upsertDraft(tx: TokenExecutor, session: SessionRow, merged: Persi
   if (existing?.deletedAt) return existing.id;
   const startedAt = session.startedAt;
   const wallMs = startedAt ? Math.max(0, activeUntil.getTime() - startedAt.getTime()) : 0;
-  const title = input.title.trim() || session.title?.trim() || existing?.title || `翻译会话 · ${activeUntil.toLocaleString('zh-CN')}`;
+  const incoming = input.title.trim();
+  const keepEditedTitle = Boolean(existing?.title && recordStatus === 'active' && incoming && incoming !== existing.title);
+  const title = keepEditedTitle ? existing?.title ?? incoming : incoming || session.title?.trim() || existing?.title || `翻译会话 · ${activeUntil.toLocaleString('zh-CN')}`;
   const gaps = input.gaps.length ? input.gaps : asGaps(session.gaps);
   let transcriptId = existing?.id ?? null;
   if (!existing) {
-    const template = summaryTemplate ?? await templateFor(session.mode, session.courseId);
+    const template = summaryTemplate ?? defaultSummaryTemplate(session.mode === 'two_way' ? 'two_way' : 'one_way');
     const [created] = await tx.insert(transcripts).values({
       userId: session.userId,
       sessionId: session.id,

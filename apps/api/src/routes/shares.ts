@@ -60,6 +60,7 @@ export async function shareRoutes(app: FastifyInstance) {
       expiresAt: share.expiresAt,
       summaryMarkdown: transcript.summaryMarkdown,
       summaryCitationHashes: transcript.summaryCitationHashes,
+      summaryCitationsVerified: transcript.summaryCitationsVerified,
       gaps: transcript.gaps,
       scope: share.scope,
       viewCount: share.viewCount + 1,

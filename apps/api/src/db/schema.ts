@@ -181,6 +181,7 @@ export const transcripts = pgTable('transcripts', {
   summaryStale: boolean('summary_stale').notNull().default(false),
   summaryInputVersion: integer('summary_input_version').notNull().default(0),
   summaryCitationHashes: jsonb('summary_citation_hashes').$type<Record<string, string>>().notNull().default(sql`'{}'::jsonb`),
+  summaryCitationsVerified: boolean('summary_citations_verified').notNull().default(true),
   noteEpoch: integer('note_epoch').notNull().default(0),
   ...times
 }, (table) => [
@@ -253,6 +254,10 @@ export const noteVersions = pgTable('note_versions', {
   inputVersion: integer('input_version'),
   provider: text('provider'),
   body: text('body').notNull(),
+  inputHash: text('input_hash'),
+  outputLanguage: text('output_language'),
+  citationHashes: jsonb('citation_hashes').$type<Record<string, string> | null>(),
+  sourceHash: text('source_hash'),
   taskId: uuid('task_id'),
   ...times
 }, (table) => [index('note_versions_transcript_idx').on(table.transcriptId, table.createdAt)]);
