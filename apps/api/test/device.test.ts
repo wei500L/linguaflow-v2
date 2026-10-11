@@ -53,7 +53,7 @@ test('another free account on a used device is blocked', () => {
     userId: 'b',
     hasDevice: true,
     claims: [{ userId: 'a', releasedAt: null }]
-  }), { ok: false, code: 'free_device_blocked' });
+  }), { ok: false, code: 'free_device_blocked', reason: 'device' });
 });
 
 test('a released claim lets the next free account through', () => {
@@ -74,7 +74,7 @@ test('one blocking key is enough when the fingerprint and device id disagree', (
       { userId: 'b', releasedAt: null },
       { userId: 'a', releasedAt: null }
     ]
-  }), { ok: false, code: 'free_device_blocked' });
+  }), { ok: false, code: 'free_device_blocked', reason: 'device' });
 });
 
 test('claim keys cover the fingerprint and the device id', () => {
@@ -106,14 +106,23 @@ test('a device header accepts json and base64url json, and drops a bad payload',
   assert.equal(parseDeviceHeader(encoded)?.canvas, signals.canvas);
 });
 
-test('a second free account on the same IP is blocked inside the window, then allowed', () => {
+test('a second free account on the same IP is not blocked, while the same device and a restricted domain still are', () => {
   const claimedAt = new Date('2026-10-09T10:00:00Z');
   const claim = { userId: 'a', releasedAt: null, key: 'ip:abc', claimedAt };
   assert.deepEqual(freeDeviceDecision({
     plan: 'free', userId: 'b', hasDevice: true, now: new Date('2026-10-09T12:00:00Z'), claims: [claim]
-  }), { ok: false, code: 'free_device_blocked' });
+  }), { ok: true });
   assert.deepEqual(freeDeviceDecision({
     plan: 'free', userId: 'b', hasDevice: true, now: new Date('2026-10-10T11:00:00Z'), claims: [claim]
+  }), { ok: true });
+  assert.deepEqual(freeDeviceDecision({
+    plan: 'free', userId: 'b', hasDevice: true, claims: [claim, { userId: 'a', releasedAt: null, key: 'dev:phone' }]
+  }), { ok: false, code: 'free_device_blocked', reason: 'device' });
+  assert.deepEqual(freeDeviceDecision({
+    plan: 'free', userId: 'b', hasDevice: true, claims: [{ userId: 'a', releasedAt: null, key: 'dom:mailinator.com' }]
+  }), { ok: false, code: 'free_device_blocked', reason: 'domain' });
+  assert.deepEqual(freeDeviceDecision({
+    plan: 'plus', userId: 'b', hasDevice: true, claims: [{ userId: 'a', releasedAt: null, key: 'dev:phone' }]
   }), { ok: true });
 });
 

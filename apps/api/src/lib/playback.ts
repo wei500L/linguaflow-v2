@@ -23,3 +23,24 @@ export function verifyAudioPlayback(token: string, transcriptId: string, now = D
   if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return null;
   return userId;
 }
+
+export function signShareAudio(shareId: string, transcriptId: string, now = Date.now()) {
+  const exp = now + ttlMs;
+  const payload = `s1.${shareId}.${transcriptId}.${exp}`;
+  const sig = crypto.createHmac('sha256', config.jwtSecret).update(payload).digest('base64url');
+  return `${payload}.${sig}`;
+}
+
+export function verifyShareAudio(token: string, transcriptId: string, now = Date.now()) {
+  const parts = token.split('.');
+  if (parts.length !== 5 || parts[0] !== 's1') return null;
+  const [, shareId, id, expText, sig] = parts;
+  if (!shareId || !id || !expText || !sig || id !== transcriptId) return null;
+  const exp = Number(expText);
+  if (!Number.isFinite(exp) || exp < now) return null;
+  const expected = crypto.createHmac('sha256', config.jwtSecret).update(`s1.${shareId}.${id}.${expText}`).digest('base64url');
+  const left = Buffer.from(sig);
+  const right = Buffer.from(expected);
+  if (left.length !== right.length || !crypto.timingSafeEqual(left, right)) return null;
+  return shareId;
+}

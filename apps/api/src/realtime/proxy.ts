@@ -2,15 +2,14 @@ import crypto from 'node:crypto';
 import WebSocket from 'ws';
 import { and, eq, isNull } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { glossaries, glossaryTerms, realtimeSessions, transcriptSegments, transcripts } from '../db/schema.js';
+import { glossaries, glossaryTerms, realtimeSessions } from '../db/schema.js';
 import { config } from '../config.js';
-import { acceptPcmFrame, foldCaptionTurns, PCM_BYTES_PER_SECOND, type TranscriptToken } from '@linguaflow/shared';
-import { settleUsage } from '../lib/quota.js';
-import { removeRecording } from '../lib/recordings.js';
-import { scheduleRecordingEncode } from './encode.js';
-import { SessionRecorder, type RecordingArtifact } from './recorder.js';
+import { acceptPcmFrame, PCM_BYTES_PER_SECOND, type AudioGap, type TranscriptToken } from '@linguaflow/shared';
+import { recordingRelative } from '../lib/recordings.js';
+import { attachRecording, finalizePersistedSession, instanceId, persistCheckpoint, rememberGap, rememberMarker } from './persist.js';
+import { SessionRecorder } from './recorder.js';
 import { buildSonioxConfig, type GlossaryMeta, type GlossaryTermInput } from './soniox.js';
-import { ensureAudienceShare } from '../lib/audience.js';
+import { recordEvent } from '../lib/events.js';
 
 const hash = (value: string) => crypto.createHash('sha256').update(value).digest('hex');
 const RECONNECT_GRACE_MS = 20_000;
@@ -181,10 +180,13 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
   rooms.set(session.id, room);
   let recorder: SessionRecorder | null = null;
   let recordingSetupError: string | null = null;
+  const gaps: AudioGap[] = [];
+  let checkpointTimer: NodeJS.Timeout | undefined;
   if (session.recordAudio) {
     try {
       recorder = new SessionRecorder(session.userId, session.id);
       await recorder.open();
+      await attachRecording(session.id, recordingRelative(session.userId, session.id, 'wav'));
     } catch {
       recorder = null;
       recordingSetupError = '无法创建录音文件。';
@@ -216,6 +218,16 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     }
     return drainPromise;
   };
+  const flushCheckpoint = (force = false) => persistCheckpoint({
+    sessionId: session.id,
+    finalTokens,
+    speakerNames: room.speakerNames,
+    title: room.title,
+    audioMs: Math.round(room.forwardedAudioBytes / (PCM_BYTES_PER_SECOND / 1000)),
+    gaps,
+    startedAt: startedAt ?? room.startedAt ?? null,
+    force
+  });
   const runFinish = async (reason: string) => {
     if (ended) return;
     ended = true;
@@ -223,70 +235,34 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     if (quotaTimer) clearInterval(quotaTimer);
     if (drainTimer) clearTimeout(drainTimer);
     if (upstreamKeepalive) clearInterval(upstreamKeepalive);
+    if (checkpointTimer) clearInterval(checkpointTimer);
     if (room.reconnectTimer) clearTimeout(room.reconnectTimer);
     room.ended = true;
-    const endedAt = new Date();
-    const seconds = startedAt ? Math.max(0, Math.ceil((endedAt.getTime() - startedAt.getTime()) / 1000)) : 0;
-    const lines = foldCaptionTurns(finalTokens, [], true);
-    let audio: RecordingArtifact = { relPath: null, status: recordingSetupError ? 'failed' : 'none', format: null, bytes: null, durationMs: null, error: recordingSetupError };
-    if (recorder) audio = await recorder.finish();
-    let saved = false;
+    const saved = await flushCheckpoint(true).catch(() => ({ ok: false, savedThrough: null, checkpointSeq: 0, stopCapture: false }));
+    await recorder?.rewriteHeader().catch(() => undefined);
+    const audio = recorder ? await recorder.finish() : { relPath: null, status: recordingSetupError ? 'failed' as const : 'none' as const, format: null, bytes: null, durationMs: null, error: recordingSetupError };
     let transcriptId: string | null = null;
+    let outcome: 'saved' | 'empty' | 'partial' | 'failed' | 'in_progress' = saved.ok ? 'empty' : 'failed';
     try {
-      await settleUsage(session.userId, session.id, seconds, reason);
-      if (lines.length || audio.relPath) {
-        const [transcript] = await db.insert(transcripts).values({
-          userId: session.userId,
-          sessionId: session.id,
-          title: room.title.trim() || session.title?.trim() || `翻译会话 · ${endedAt.toLocaleString('zh-CN')}`,
-          mode: session.mode,
-          languageA: session.languageA,
-          languageB: session.languageB ?? session.targetLanguage ?? 'en',
-          durationMs: seconds * 1000,
-          audioRelPath: audio.relPath,
-          audioStatus: audio.status,
-          audioFormat: audio.format,
-          audioBytes: audio.bytes,
-          audioDurationMs: audio.durationMs,
-          audioError: audio.error
-        }).returning();
-        try {
-          if (lines.length) {
-            await db.insert(transcriptSegments).values(lines.map((segment, index) => ({
-              transcriptId: transcript.id,
-              idx: index,
-              sourceText: segment.source,
-              translationText: segment.translation,
-              language: segment.language ?? null,
-              startMs: segment.startMs ?? null,
-              endMs: segment.endMs ?? null,
-              speaker: segment.speaker ? room.speakerNames[segment.speaker] ?? segment.speaker : null
-            })));
-          }
-          saved = true;
-          transcriptId = transcript.id;
-        } catch (error) {
-          await db.delete(transcripts).where(eq(transcripts.id, transcript.id));
-          throw error;
-        }
-      }
-      if (transcriptId) {
-        const [fresh] = await db.select().from(realtimeSessions).where(eq(realtimeSessions.id, session.id));
-        if (fresh) await ensureAudienceShare(fresh, transcriptId).catch(() => null);
-      }
+      const result = await finalizePersistedSession(session.id, reason, { interrupted: reason === 'interrupted' || reason === 'server_restart', audio, title: room.title, gaps, speakerNames: room.speakerNames });
+      transcriptId = result.transcriptId;
+      outcome = result.outcome;
+      if (!saved.ok && transcriptId) outcome = 'partial';
+      if (!saved.ok && !transcriptId) outcome = 'failed';
+    } catch (error) {
+      console.error('[LinguaFlow] finalize failed', session.id, error);
+      outcome = transcriptId ? 'partial' : 'failed';
     } finally {
-      if (!saved && audio.relPath) await removeRecording(audio.relPath);
       const host = hostSocket();
-      sendJson(host, { type: 'finished', reason, transcriptId });
+      sendJson(host, { type: 'finished', reason, transcriptId, outcome });
       if (host.readyState === WebSocket.OPEN) host.close();
       for (const socket of room.audience) {
-        sendJson(socket, { type: 'finished' });
+        sendJson(socket, { type: 'finished', reason, transcriptId, outcome });
         if (socket.readyState === WebSocket.OPEN) socket.close();
       }
       room.audience.clear();
       if (upstream.readyState === upstream.OPEN || upstream.readyState === upstream.CONNECTING) upstream.close();
     }
-    if (saved && transcriptId && audio.status === 'encoding') scheduleRecordingEncode(transcriptId);
   };
   activeSessions.set(session.id, requestDrain);
   const keepUpstreamAlive = () => {
@@ -298,7 +274,13 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     disableNagle(upstream);
     if (ended) return;
     startedAt = new Date();
-    await db.update(realtimeSessions).set({ startedAt, status: 'active' }).where(and(eq(realtimeSessions.id, session.id), eq(realtimeSessions.status, 'connecting')));
+    await db.update(realtimeSessions).set({ startedAt, status: 'active', ownerInstanceId: instanceId, ownerHeartbeatAt: startedAt, activeUntil: startedAt }).where(and(eq(realtimeSessions.id, session.id), eq(realtimeSessions.status, 'connecting')));
+    await recordEvent({ userId: session.userId, name: 'session_ready', dedupeKey: `session_ready:${session.id}`, props: { sessionId: session.id, mode: session.mode } });
+    checkpointTimer = setInterval(() => { void flushCheckpoint(true).then((result) => {
+      sendJson(hostSocket(), { type: 'save_status', status: result.ok ? 'saved' : 'failed', savedThrough: result.savedThrough, checkpointSeq: result.checkpointSeq });
+      if (!result.ok && result.stopCapture) void requestDrain('save_failed');
+    }).catch(() => undefined); }, 4_000);
+    checkpointTimer.unref();
     if (ended || upstream.readyState !== upstream.OPEN) return;
     upstream.send(JSON.stringify(buildSonioxConfig(session, loadedGlossary.terms, loadedGlossary.glossary)));
     upstreamKeepalive = setInterval(keepUpstreamAlive, UPSTREAM_KEEPALIVE_MS);
@@ -331,8 +313,16 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     }
     const totalAudioProcMs = typeof event.total_audio_proc_ms === 'number' && Number.isFinite(event.total_audio_proc_ms) ? event.total_audio_proc_ms : undefined;
     if (event.tokens?.length || totalAudioProcMs !== undefined) {
+      let sawFinal = false;
       for (const token of event.tokens ?? []) {
-        if (token.text === '<end>' || token.is_final) finalTokens.push(token);
+        if (token.text === '<end>' || token.is_final) { finalTokens.push(token); sawFinal = true; }
+      }
+      if (sawFinal) {
+        void flushCheckpoint(false).then((result) => {
+          if (!result.savedThrough && result.ok) return;
+          sendJson(hostSocket(), { type: 'save_status', status: result.ok ? 'saved' : 'failed', savedThrough: result.savedThrough, checkpointSeq: result.checkpointSeq });
+          if (!result.ok && result.stopCapture) void requestDrain('save_failed');
+        }).catch(() => undefined);
       }
       const tokens = event.tokens ?? [];
       sendJson(hostSocket(), { type: 'transcript', tokens, ...(totalAudioProcMs !== undefined ? { totalAudioProcMs } : {}) });
@@ -356,7 +346,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
       if (!isBinary) {
         const data = message.toString();
         try {
-          const event = JSON.parse(data) as { type?: string; names?: unknown; title?: unknown };
+          const event = JSON.parse(data) as { type?: string; names?: unknown; title?: unknown; id?: unknown; source?: unknown; kind?: unknown; wallStartMs?: unknown; wallEndMs?: unknown; audioStartMs?: unknown; audioEndMs?: unknown; precision?: unknown; wallMs?: unknown; audioMs?: unknown; note?: unknown };
           if (event.type === 'speakers') {
             const names = cleanSpeakerNames(event.names);
             if (names) room.speakerNames = names;
@@ -371,6 +361,16 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
           if (event.type === 'stop') {
             if (typeof event.title === 'string' && event.title.trim()) room.title = event.title.trim().slice(0, 120);
             void requestDrain('completed');
+            return;
+          }
+          if (event.type === 'gap') {
+            const gap = cleanGap(event);
+            if (gap && !gaps.some((item) => item.id === gap.id)) { gaps.push(gap); void rememberGap(session.id, gap).catch(() => undefined); }
+            return;
+          }
+          if (event.type === 'marker') {
+            const marker = cleanMarker(event);
+            if (marker) void rememberMarker({ ...marker, userId: session.userId, sessionId: session.id }).catch(() => undefined);
             return;
           }
           if (stopRequested || upstream.readyState !== upstream.OPEN) return;
@@ -399,7 +399,8 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
       if (room.reconnectTimer) clearTimeout(room.reconnectTimer);
       room.reconnectTimer = setTimeout(() => { void requestDrain('client_closed'); }, RECONNECT_GRACE_MS);
       room.reconnectTimer.unref();
-      runQuiet(session.id, db.update(realtimeSessions).set({ status: 'reconnecting', claimedAt: new Date() }).where(and(eq(realtimeSessions.id, session.id), isNull(realtimeSessions.endedAt))));
+      runQuiet(session.id, db.update(realtimeSessions).set({ status: 'reconnecting', claimedAt: new Date(), ownerHeartbeatAt: new Date(), ownerInstanceId: instanceId }).where(and(eq(realtimeSessions.id, session.id), isNull(realtimeSessions.endedAt))));
+      void recordEvent({ userId: session.userId, name: 'connection_interrupted', dedupeKey: `connection_interrupted:${session.id}:${Date.now()}`, props: { sessionId: session.id } });
     });
   };
   room.bindClient = bindClient;
@@ -420,13 +421,33 @@ export async function handleReconnectSocket(client: WebSocket, token: string) {
   }
   if (room.reconnectTimer) clearTimeout(room.reconnectTimer);
   room.reconnectTimer = undefined;
-  await db.update(realtimeSessions).set({ status: 'active', claimedAt: new Date() }).where(eq(realtimeSessions.id, session.id));
+  await db.update(realtimeSessions).set({ status: 'active', claimedAt: new Date(), ownerInstanceId: instanceId, ownerHeartbeatAt: new Date() }).where(eq(realtimeSessions.id, session.id));
+  await recordEvent({ userId: session.userId, name: 'connection_recovered', dedupeKey: `connection_recovered:${session.id}:${Date.now()}`, props: { sessionId: session.id } });
   room.bindClient(client);
   const elapsed = room.startedAt ? Math.floor((Date.now() - room.startedAt.getTime()) / 1000) : 0;
   if (client.readyState === client.OPEN) {
     client.send(JSON.stringify({ type: 'ready', sessionId: session.id, allowedSeconds: Math.max(0, room.allowed - elapsed), receivedAudioMs: room.forwardedAudioBytes / (PCM_BYTES_PER_SECOND / 1000) }));
     client.send(JSON.stringify({ type: 'snapshot', tokens: room.finalTokens, speakerNames: room.speakerNames }));
   }
+}
+
+function finite(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? Math.round(value) : null;
+}
+
+function cleanGap(event: { id?: unknown; source?: unknown; wallStartMs?: unknown; wallEndMs?: unknown; audioStartMs?: unknown; audioEndMs?: unknown; precision?: unknown }): AudioGap | null {
+  const source = event.source;
+  if (source !== 'user_pause' && source !== 'system_suspend' && source !== 'reconnect' && source !== 'queue_overflow' && source !== 'dropped') return null;
+  const id = typeof event.id === 'string' && /^[0-9a-f-]{36}$/i.test(event.id) ? event.id : crypto.randomUUID();
+  const precision = event.precision === 'exact' || event.precision === 'estimated' || event.precision === 'unknown' ? event.precision : 'unknown';
+  return { id, source, wallStartMs: finite(event.wallStartMs), wallEndMs: finite(event.wallEndMs), audioStartMs: finite(event.audioStartMs), audioEndMs: finite(event.audioEndMs), precision };
+}
+
+function cleanMarker(event: { id?: unknown; kind?: unknown; note?: unknown; wallMs?: unknown; audioMs?: unknown }): { id: string; kind: 'important' | 'unclear' | 'assignment'; note: string | null; wallMs: number | null; audioMs: number | null } | null {
+  const kind = event.kind === 'important' || event.kind === 'unclear' || event.kind === 'assignment' ? event.kind : null;
+  if (!kind) return null;
+  const id = typeof event.id === 'string' && /^[0-9a-f-]{36}$/i.test(event.id) ? event.id : crypto.randomUUID();
+  return { id, kind, note: typeof event.note === 'string' ? event.note : null, wallMs: finite(event.wallMs), audioMs: finite(event.audioMs) };
 }
 
 async function loadSessionTerms(userId: string, glossaryId: string | null): Promise<{ terms: GlossaryTermInput[]; glossary: GlossaryMeta | null }> {

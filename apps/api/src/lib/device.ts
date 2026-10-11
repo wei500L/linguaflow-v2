@@ -22,13 +22,12 @@ export type DeviceSignals = z.infer<typeof deviceSignalSchema>;
 export type DeviceRef = { fingerprintHash: string; deviceId: string; strong?: boolean };
 export type DeviceClaimView = { userId: string; releasedAt: Date | null; key?: string; claimedAt?: Date | null };
 
+/* An IP claim is a risk and rate-limit signal. It never, by itself, decides that two
+   free accounts are the same person. Device and restricted-domain claims still do. */
 export function claimBlocks(claim: DeviceClaimView, userId: string, now = new Date()) {
+  void now;
   if (claim.releasedAt || claim.userId === userId) return false;
-  if (claim.key?.startsWith('ip:')) {
-    const at = claim.claimedAt?.getTime();
-    if (at == null) return true;
-    return now.getTime() - at < FREE_IP_WINDOW_MS;
-  }
+  if (claim.key?.startsWith('ip:')) return false;
   return true;
 }
 
@@ -41,7 +40,8 @@ export function serverClaimKeys(input: { signupIp?: string | null; email?: strin
   return keys;
 }
 
-export const freeDeviceBlockedMessage = '浏览器指纹不能单独防止多开。这台设备，或同一网络上短时间内注册的新免费账号，已经使用过免费额度。开通套餐后可以继续使用。';
+export const freeDeviceBlockedMessage = '这台设备已经使用过免费额度，新的免费账号不能再开始翻译。开通套餐后可以继续使用。';
+export const freeDomainBlockedMessage = '这个邮箱域名不能再领取免费额度。开通套餐后可以继续使用。';
 export const FREE_IP_WINDOW_MS = 24 * 60 * 60 * 1000;
 export const deviceRequiredMessage = '无法识别这台设备，请刷新页面后再试。';
 
@@ -85,11 +85,13 @@ export function freeDeviceDecision(input: {
   hasDevice: boolean;
   claims: DeviceClaimView[];
   now?: Date;
-}): { ok: true } | { ok: false; code: 'free_device_blocked' | 'device_required' } {
+}): { ok: true } | { ok: false; code: 'free_device_blocked' | 'device_required'; reason?: 'device' | 'domain' } {
   if (input.plan !== 'free') return { ok: true };
   if (!input.hasDevice) return { ok: false, code: 'device_required' };
-  const blocked = input.claims.some((claim) => claimBlocks(claim, input.userId, input.now));
-  return blocked ? { ok: false, code: 'free_device_blocked' } : { ok: true };
+  const blocked = input.claims.filter((claim) => claimBlocks(claim, input.userId, input.now));
+  if (!blocked.length) return { ok: true };
+  const reason = blocked.some((claim) => claim.key?.startsWith('dom:')) && blocked.every((claim) => claim.key?.startsWith('dom:') || claim.key?.startsWith('ip:')) ? 'domain' : 'device';
+  return { ok: false, code: 'free_device_blocked', reason };
 }
 
 function decodeDeviceHeader(value: string) {

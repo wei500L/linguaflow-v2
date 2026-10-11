@@ -13,15 +13,16 @@ import {
   fingerprintHash,
   fingerprintKey,
   freeDeviceBlockedMessage,
+  freeDomainBlockedMessage,
   freeDeviceDecision,
   parseDeviceHeader,
   serverClaimKeys,
   type DeviceRef
 } from './device.js';
 
-export function deviceDenied(code: 'free_device_blocked' | 'device_required') {
-  const message = code === 'free_device_blocked' ? freeDeviceBlockedMessage : deviceRequiredMessage;
-  return Object.assign(new Error(message), { statusCode: 403, code });
+export function deviceDenied(code: 'free_device_blocked' | 'device_required', reason?: 'device' | 'domain') {
+  const message = code === 'device_required' ? deviceRequiredMessage : reason === 'domain' ? freeDomainBlockedMessage : freeDeviceBlockedMessage;
+  return Object.assign(new Error(message), { statusCode: 403, code, reason });
 }
 
 export async function recordUserDevice(userId: string, request: FastifyRequest): Promise<DeviceRef | null> {
@@ -60,7 +61,7 @@ export async function assertFreeTranslation(userId: string, device: DeviceRef | 
     ? await db.select({ userId: deviceClaims.claimedBy, releasedAt: deviceClaims.releasedAt, key: deviceClaims.key, claimedAt: deviceClaims.claimedAt }).from(deviceClaims).where(inArray(deviceClaims.key, keys))
     : [];
   const decision = freeDeviceDecision({ plan: entitlement.plan, userId, hasDevice: Boolean(device), claims });
-  if (!decision.ok) throw deviceDenied(decision.code);
+  if (!decision.ok) throw deviceDenied(decision.code, 'reason' in decision ? decision.reason : undefined);
   return entitlement;
 }
 

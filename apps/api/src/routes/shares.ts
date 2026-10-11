@@ -5,7 +5,7 @@ import { z } from 'zod';
 import { db } from '../db/index.js';
 import { transcriptSegments, transcriptTasks, transcripts } from '../db/schema.js';
 import { sendTranscriptFile } from '../export/download.js';
-import { signAudioPlayback } from '../lib/playback.js';
+import { signShareAudio } from '../lib/playback.js';
 import { createShare, listShares, openShare, recordShareView, reissueShare, resolveShareExpiry, revokeShare, sharePasswordMatches } from '../lib/shares.js';
 
 async function owned(userId: string, id: string) {
@@ -13,11 +13,10 @@ async function owned(userId: string, id: string) {
   return transcript;
 }
 
-function shareAudioUrl(share: { includeAudio: boolean; passwordHash: string | null; scope: string }, transcript: { id: string; userId: string; audioRelPath: string | null; audioStatus: string | null }, token: string) {
+function shareAudioUrl(share: { id: string; includeAudio: boolean; passwordHash: string | null; scope: string }, transcript: { id: string; userId: string; audioRelPath: string | null; audioStatus: string | null }, _token: string) {
   if (share.scope === 'summary' || !share.includeAudio || !transcript.audioRelPath) return null;
   if (transcript.audioStatus !== 'ready' && transcript.audioStatus !== 'encoding') return null;
-  if (share.passwordHash) return `/v1/transcripts/${transcript.id}/audio?playback=${encodeURIComponent(signAudioPlayback(transcript.id, transcript.userId))}`;
-  return `/v1/transcripts/${transcript.id}/audio?share=${encodeURIComponent(token)}`;
+  return `/v1/transcripts/${transcript.id}/audio?playback=${encodeURIComponent(signShareAudio(share.id, transcript.id))}`;
 }
 
 async function readShare(request: FastifyRequest, reply: FastifyReply) {
@@ -37,7 +36,7 @@ export async function shareRoutes(app: FastifyInstance) {
     const share = await readShare(request, reply);
     if (!share) return reply.sent ? reply : reply.code(404).send({ message: '分享链接已失效。' });
     const [transcript] = await db.select().from(transcripts).where(eq(transcripts.id, share.transcriptId));
-    if (!transcript) return reply.code(404).send({ message: '分享链接已失效。' });
+    if (!transcript || transcript.deletedAt) return reply.code(404).send({ message: '分享链接已失效。' });
     await recordShareView(share.id);
     const summaryOnly = share.scope === 'summary';
     const segments = summaryOnly ? [] : await db.select({
@@ -74,7 +73,7 @@ export async function shareRoutes(app: FastifyInstance) {
     if (!share) return reply.sent ? reply : reply.code(404).send({ message: '分享链接已失效。' });
     const query = z.object({ format: z.enum(['txt', 'srt', 'vtt', 'md', 'pdf']).default('txt'), scope: z.enum(['summary', 'full']).default('full') }).parse(request.query);
     const [transcript] = await db.select().from(transcripts).where(eq(transcripts.id, share.transcriptId));
-    if (!transcript) return reply.code(404).send({ message: '分享链接已失效。' });
+    if (!transcript || transcript.deletedAt) return reply.code(404).send({ message: '分享链接已失效。' });
     const summaryOnly = share.scope === 'summary' || query.scope === 'summary';
     if (share.scope === 'summary' && (query.format === 'srt' || query.format === 'vtt')) return reply.code(409).send({ message: '这份分享只有纪要。' });
     const segments = summaryOnly ? [] : await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcript.id)).orderBy(transcriptSegments.idx);

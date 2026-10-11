@@ -3,20 +3,25 @@ import { stat } from 'node:fs/promises';
 import type { FastifyInstance } from 'fastify';
 import { and, asc, desc, eq, gte, inArray, isNull, lte, or, sql } from 'drizzle-orm';
 import { z } from 'zod';
-import { PLANS, summaryChargeSeconds, type Plan } from '@linguaflow/shared';
+import { isIanaTimeZone, PLANS, summaryChargeSeconds, type Plan } from '@linguaflow/shared';
 import { db } from '../db/index.js';
-import { entitlements, transcriptFolders, transcriptSegments, transcriptTasks, transcripts } from '../db/schema.js';
+import { entitlements, noteVersions, realtimeSessions, transcriptFolders, transcriptSegments, transcriptTasks, transcripts } from '../db/schema.js';
 import { recordUserDevice } from '../lib/device-store.js';
+import { recordEvent } from '../lib/events.js';
 import { ensureEntitlement } from '../lib/quota.js';
 import { sendTranscriptFile } from '../export/download.js';
 import { buildMeetingMarkdown, safeDownloadName, type MeetingDocument } from '../export/meeting.js';
-import { signAudioPlayback, verifyAudioPlayback } from '../lib/playback.js';
-import { removeRecording, resolveRecording } from '../lib/recordings.js';
-import { cancelSummary, maybeRefreshSummary, startSummary, summarySourceHash } from '../summary/jobs.js';
+import { signAudioPlayback, verifyAudioPlayback, verifyShareAudio } from '../lib/playback.js';
+import { resolveRecording } from '../lib/recordings.js';
+import { shareIsActive } from '../lib/shares.js';
+import { hardDeleteTranscripts, restoreTranscripts, softDeleteTranscripts } from '../lib/trash.js';
+import { cancelSummary, markSummaryStale, quoteSummary, restoreNoteVersion, saveHumanNote, startSummary, SUMMARY_TEMPLATES, summarySourceHash } from '../summary/jobs.js';
+import type { SummaryTemplate } from '../summary/pipeline.js';
 
 const exportQuery = z.object({
   format: z.enum(['txt', 'srt', 'vtt', 'md', 'pdf']).default('txt'),
-  scope: z.enum(['summary', 'full']).default('full')
+  scope: z.enum(['summary', 'full']).default('full'),
+  tz: z.string().trim().max(64).optional()
 });
 const titleBody = z.object({
   title: z.string().trim().min(1).max(120).optional(),
@@ -26,9 +31,14 @@ const titleBody = z.object({
 });
 const summaryBody = z.object({ markdown: z.string().max(200_000) });
 const summaryRequest = z.object({
-  template: z.enum(['meeting', 'classroom', 'interview', 'briefing']).default('meeting'),
+  template: z.enum(['meeting', 'classroom', 'interview', 'briefing']).optional(),
   outputLanguage: z.string().trim().min(1).max(40).default('中文'),
-  provider: z.enum(['platform', 'byok']).default('byok')
+  provider: z.enum(['platform', 'byok']).default('byok'),
+  idempotencyKey: z.string().trim().min(8).max(80),
+  inputHash: z.string().trim().min(4).max(80),
+  inputVersion: z.number().int().min(0),
+  quoteSeconds: z.number().int().min(0),
+  confirmOverwrite: z.boolean().optional()
 });
 const listQuery = z.object({
   q: z.string().trim().max(80).optional(),
@@ -54,20 +64,37 @@ function likePattern(value: string) {
   return `%${value.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
 }
 
-async function ownedTranscript(userId: string, id: string) {
-  const [transcript] = await db.select().from(transcripts).where(and(eq(transcripts.id, id), eq(transcripts.userId, userId)));
+async function ownedTranscript(userId: string, id: string, trash = false) {
+  const filters = [eq(transcripts.id, id), eq(transcripts.userId, userId)];
+  if (!trash) filters.push(isNull(transcripts.deletedAt));
+  const [transcript] = await db.select().from(transcripts).where(and(...filters));
   return transcript;
 }
 
-function meetingDocument(transcript: typeof transcripts.$inferSelect, segments: Array<typeof transcriptSegments.$inferSelect>): MeetingDocument {
+async function meetingDocument(transcript: typeof transcripts.$inferSelect, segments: Array<typeof transcriptSegments.$inferSelect>, timeZone?: string | null): Promise<MeetingDocument> {
+  let startedAt = transcript.startedAt;
+  let endedAt = transcript.endedAt;
+  if ((!startedAt || !endedAt) && transcript.sessionId) {
+    const [session] = await db.select({ startedAt: realtimeSessions.startedAt, endedAt: realtimeSessions.endedAt, activeUntil: realtimeSessions.activeUntil }).from(realtimeSessions).where(eq(realtimeSessions.id, transcript.sessionId));
+    startedAt = startedAt ?? session?.startedAt ?? null;
+    endedAt = endedAt ?? session?.activeUntil ?? null;
+    if (!transcript.recordStatus || transcript.recordStatus === 'complete') endedAt = transcript.endedAt ?? session?.endedAt ?? endedAt;
+  }
   return {
     title: transcript.title,
     createdAt: transcript.createdAt,
+    startedAt,
+    endedAt,
+    mode: transcript.mode,
+    timeZone: timeZone && isIanaTimeZone(timeZone) ? timeZone : null,
     durationMs: transcript.durationMs,
+    audioDurationMs: transcript.audioDurationMs,
     languageA: transcript.languageA,
     languageB: transcript.languageB,
     summaryMarkdown: transcript.summaryMarkdown,
-    segments: segments.map((segment) => ({ sourceText: segment.sourceText, translationText: segment.translationText, startMs: segment.startMs, endMs: segment.endMs, speaker: segment.speaker }))
+    gaps: Array.isArray(transcript.gaps) ? transcript.gaps : [],
+    recordStatus: transcript.recordStatus,
+    segments: segments.map((segment) => ({ id: segment.id, sourceText: segment.sourceText, translationText: segment.translationText, startMs: segment.startMs, endMs: segment.endMs, speaker: segment.speaker }))
   };
 }
 
@@ -75,7 +102,7 @@ export async function transcriptRoutes(app: FastifyInstance) {
   app.get('/v1/transcripts', { preHandler: app.authenticate }, async (request) => {
     const userId = (request.user as { sub: string }).sub;
     const query = listQuery.parse(request.query);
-    const filters = [eq(transcripts.userId, userId)];
+    const filters = [eq(transcripts.userId, userId), isNull(transcripts.deletedAt)];
     if (query.q) {
       const pattern = likePattern(query.q);
       filters.push(sql`(${transcripts.title} ilike ${pattern} escape '\\' or exists (select 1 from transcript_segments s where s.transcript_id = ${transcripts.id} and (s.source_text ilike ${pattern} escape '\\' or s.translation_text ilike ${pattern} escape '\\')))`);
@@ -137,21 +164,18 @@ export async function transcriptRoutes(app: FastifyInstance) {
       action: z.enum(['delete', 'star', 'unstar', 'move', 'export']),
       folderId: z.string().uuid().nullable().optional()
     }).parse(request.body);
-    const rows = await db.select().from(transcripts).where(and(eq(transcripts.userId, userId), inArray(transcripts.id, body.ids)));
+    const rows = await db.select().from(transcripts).where(and(eq(transcripts.userId, userId), inArray(transcripts.id, body.ids), isNull(transcripts.deletedAt)));
     if (body.action === 'export') {
       const parts = await Promise.all(rows.map(async (transcript) => {
         const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcript.id)).orderBy(transcriptSegments.idx);
-        return buildMeetingMarkdown(meetingDocument(transcript, segments));
+        return buildMeetingMarkdown(await meetingDocument(transcript, segments));
       }));
       reply.header('content-disposition', safeDownloadName('linguaflow-transcripts', 'md'));
       return reply.type('text/markdown; charset=utf-8').send(parts.join('\n\n---\n\n'));
     }
     if (body.action === 'delete') {
-      for (const transcript of rows) {
-        await db.delete(transcripts).where(eq(transcripts.id, transcript.id));
-        if (transcript.audioRelPath) await removeRecording(transcript.audioRelPath);
-      }
-      return { deleted: rows.length };
+      const deleted = await softDeleteTranscripts(userId, rows.map((transcript) => transcript.id));
+      return { deleted };
     }
     if (body.action === 'move') {
       if (body.folderId) {
@@ -177,6 +201,7 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const unlimited = PLANS[entitlement.plan as Plan].monthlySeconds === null;
     const hash = summarySourceHash(segments);
     const tasks = await db.select().from(transcriptTasks).where(eq(transcriptTasks.transcriptId, id)).orderBy(transcriptTasks.position);
+    await recordEvent({ userId, name: 'record_opened', dedupeKey: `record_opened:${id}:${userId}:${Math.floor(Date.now() / 60_000)}`, props: { transcriptId: id } });
     return {
       ...transcript,
       audioPlaybackToken: playable && transcript.audioRelPath ? signAudioPlayback(transcript.id, userId) : null,
@@ -196,8 +221,8 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const [segment] = await db.update(transcriptSegments).set({ sourceText: body.sourceText, translationText: body.translationText, speaker: body.speaker ?? null }).where(and(eq(transcriptSegments.id, segmentId), eq(transcriptSegments.transcriptId, id))).returning();
     if (!segment) return reply.code(404).send({ message: '找不到这句字幕。' });
     const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, id));
-    const refresh = await maybeRefreshSummary(userId, id);
-    return { segment, summaryStale: Boolean(transcript.summarySourceHash && transcript.summarySourceHash !== summarySourceHash(segments)), summaryRefresh: refresh };
+    const refresh = await markSummaryStale(userId, id);
+    return { segment, summaryStale: refresh.stale, summaryRefresh: { refreshed: false as const } };
   });
 
   app.post('/v1/transcripts/:id/speakers', { preHandler: app.authenticate }, async (request, reply) => {
@@ -208,8 +233,8 @@ export async function transcriptRoutes(app: FastifyInstance) {
     if (!transcript) return reply.code(404).send({ message: 'Transcript not found' });
     const updated = await db.update(transcriptSegments).set({ speaker: body.to }).where(and(eq(transcriptSegments.transcriptId, id), eq(transcriptSegments.speaker, body.from))).returning({ id: transcriptSegments.id });
     const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, id));
-    const refresh = await maybeRefreshSummary(userId, id);
-    return { updated: updated.length, summaryStale: Boolean(transcript.summarySourceHash && transcript.summarySourceHash !== summarySourceHash(segments)), summaryRefresh: refresh };
+    const refresh = await markSummaryStale(userId, id);
+    return { updated: updated.length, summaryStale: refresh.stale, summaryRefresh: { refreshed: false as const } };
   });
 
   app.patch('/v1/transcripts/:id', { preHandler: app.authenticate }, async (request, reply) => {
@@ -250,17 +275,21 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const userId = (request.user as { sub: string }).sub;
     const { id } = request.params as { id: string };
     const body = summaryBody.parse(request.body);
-    const [updated] = await db.update(transcripts).set({ summaryMarkdown: body.markdown, summaryStatus: 'ready', summaryError: null, summaryEditedAt: new Date() }).where(and(eq(transcripts.id, id), eq(transcripts.userId, userId))).returning();
+    const updated = await saveHumanNote(userId, id, body.markdown);
     if (!updated) return reply.code(404).send({ message: 'Transcript not found' });
     return updated;
   });
 
-  app.post('/v1/transcripts/:id/summary', { preHandler: app.authenticate }, async (request) => {
+  app.post('/v1/transcripts/:id/summary', { preHandler: app.authenticate }, async (request, reply) => {
     const userId = (request.user as { sub: string }).sub;
     const { id } = request.params as { id: string };
     const body = summaryRequest.parse(request.body ?? {});
+    const transcript = await ownedTranscript(userId, id);
+    if (!transcript) return reply.code(404).send({ message: 'Transcript not found' });
+    const template = (body.template ?? transcript.summaryTemplate ?? (transcript.mode === 'one_way' ? 'classroom' : 'meeting'));
+    if (!(SUMMARY_TEMPLATES as readonly string[]).includes(template)) return reply.code(400).send({ message: '不支持这个笔记模板。' });
     const device = await recordUserDevice(userId, request);
-    return startSummary(userId, id, body.template, body.outputLanguage, body.provider, device);
+    return startSummary(userId, id, template as SummaryTemplate, body.outputLanguage, body.provider, device, body);
   });
 
   app.post('/v1/transcripts/:id/summary/cancel', { preHandler: app.authenticate }, async (request) => {
@@ -269,11 +298,38 @@ export async function transcriptRoutes(app: FastifyInstance) {
     return cancelSummary(userId, id);
   });
 
+  app.post('/v1/transcripts/:id/summary/quote', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const { id } = request.params as { id: string };
+    const body = z.object({ template: z.enum(['meeting', 'classroom', 'interview', 'briefing']).optional(), provider: z.enum(['platform', 'byok']).default('byok') }).parse(request.body ?? {});
+    const transcript = await ownedTranscript(userId, id);
+    if (!transcript) return reply.code(404).send({ message: 'Transcript not found' });
+    const template = (body.template ?? transcript.summaryTemplate ?? (transcript.mode === 'one_way' ? 'classroom' : 'meeting')) as SummaryTemplate;
+    return quoteSummary(userId, id, template, body.provider);
+  });
+
+  app.get('/v1/transcripts/:id/notes', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const { id } = request.params as { id: string };
+    if (!await ownedTranscript(userId, id)) return reply.code(404).send({ message: 'Transcript not found' });
+    const versions = await db.select({ id: noteVersions.id, authorType: noteVersions.authorType, template: noteVersions.template, inputVersion: noteVersions.inputVersion, provider: noteVersions.provider, createdAt: noteVersions.createdAt }).from(noteVersions).where(and(eq(noteVersions.transcriptId, id), eq(noteVersions.userId, userId))).orderBy(desc(noteVersions.createdAt));
+    return { versions };
+  });
+
+  app.post('/v1/transcripts/:id/notes/:versionId/restore', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const { id, versionId } = request.params as { id: string; versionId: string };
+    const updated = await restoreNoteVersion(userId, id, versionId);
+    if (!updated) return reply.code(404).send({ message: '找不到这个版本。' });
+    return updated;
+  });
+
   app.delete('/v1/transcripts/:id', { preHandler: app.authenticate }, async (request, reply) => {
     const userId = (request.user as { sub: string }).sub;
     const { id } = request.params as { id: string };
-    const [removed] = await db.delete(transcripts).where(and(eq(transcripts.id, id), eq(transcripts.userId, userId))).returning();
-    if (removed?.audioRelPath) await removeRecording(removed.audioRelPath);
+    const permanent = (request.query as { permanent?: string }).permanent === '1';
+    const removed = permanent ? await hardDeleteTranscripts(userId, [id]) : await softDeleteTranscripts(userId, [id]);
+    if (!removed) return reply.code(404).send({ message: 'Transcript not found' });
     return reply.code(204).send();
   });
 
@@ -291,9 +347,18 @@ export async function transcriptRoutes(app: FastifyInstance) {
       if (!owner) return reply.code(404).send({ message: '找不到录音。' });
       userId = owner.userId;
     } else if (query.playback) {
-      const owner = verifyAudioPlayback(query.playback, id);
-      if (!owner) return reply.code(401).send({ message: 'Authentication required' });
-      userId = owner;
+      const shareId = verifyShareAudio(query.playback, id);
+      if (shareId) {
+        const { transcriptShares } = await import('../db/schema.js');
+        const [share] = await db.select().from(transcriptShares).where(eq(transcriptShares.id, shareId));
+        const [owner] = await db.select().from(transcripts).where(eq(transcripts.id, id));
+        if (!share || share.transcriptId !== id || !share.includeAudio || share.scope === 'summary' || !shareIsActive(share) || !owner || owner.deletedAt) return reply.code(401).send({ message: 'Authentication required' });
+        userId = owner.userId;
+      } else {
+        const owner = verifyAudioPlayback(query.playback, id);
+        if (!owner) return reply.code(401).send({ message: 'Authentication required' });
+        userId = owner;
+      }
     } else {
       try { await request.jwtVerify(); } catch { return reply.code(401).send({ message: 'Authentication required' }); }
       userId = (request.user as { sub: string }).sub;
@@ -333,6 +398,8 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const transcript = await ownedTranscript(userId, id);
     if (!transcript) return reply.code(404).send({ message: 'Transcript not found' });
     const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, id)).orderBy(transcriptSegments.idx);
-    return sendTranscriptFile(reply, meetingDocument(transcript, segments), query.format, query.scope);
+    const zone = query.tz && isIanaTimeZone(query.tz) ? query.tz : null;
+    await recordEvent({ userId, name: 'export_succeeded', dedupeKey: `export:${id}:${query.format}:${userId}:${Math.floor(Date.now() / 60_000)}`, props: { transcriptId: id } });
+    return sendTranscriptFile(reply, await meetingDocument(transcript, segments, zone), query.format, query.scope);
   });
 }

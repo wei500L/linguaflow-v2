@@ -1,6 +1,6 @@
 export const SUMMARY_TEMPLATES = ['meeting', 'classroom', 'interview', 'briefing'] as const;
 export type SummaryTemplate = (typeof SUMMARY_TEMPLATES)[number];
-export type SummaryEntry = { timestamp: string; original: string; translation: string };
+export type SummaryEntry = { timestamp: string; original: string; translation: string; segmentId?: string; speaker?: string | null; startMs?: number | null };
 export type ChatMessage = { role: 'system' | 'user'; content: string };
 
 const TEMPLATES: Record<SummaryTemplate, string> = {
@@ -15,6 +15,8 @@ const CHUNK_PROMPT = '你是会议记录分析员。下面是一场{kind}记录�
 const MERGE_PROMPT = '你是会议纪要撰写人。以下是对同一场{kind}（{span}，共 {total} 部分）分段提取的关键信息。合并成一份最终{lang}纪要：\n- 去除各部分之间重复的内容，合并同一话题。\n- 任何在任一部分出现的数字、日期、人名、决定、待办事项都必须保留。\n- 输出结构遵循给定的纪要模板。\n- 只输出纪要本身。';
 
 const KIND: Record<SummaryTemplate, string> = { meeting: '会议', classroom: '课堂', interview: '访谈', briefing: '简报' };
+const RECORD_LABEL: Record<SummaryTemplate, string> = { meeting: '会议记录', classroom: '课堂记录', interview: '访谈记录', briefing: '简报材料' };
+const SOURCE_RULE = '每条记录都带有原文、译文和 [[seg:ID]]。关键定义、公式、作业、考试、数字和日期必须附上记录里真实存在的 [[seg:ID]]。没有依据时写「待核对」。老师原话、翻译和 AI 整理要分开，不要把翻译说成原话，也不要补上语音里没出现的板书公式。';
 
 function fill(template: string, values: Record<string, string>) {
   return Object.entries(values).reduce((text, [key, value]) => text.split(`{${key}}`).join(value), template);
@@ -28,9 +30,16 @@ export class SummaryError extends Error {
 
 export function entriesToText(entries: SummaryEntry[]) {
   return entries.map((entry) => {
-    const body = (entry.translation || entry.original).trim();
-    return body ? `[${entry.timestamp}] ${body}` : '';
-  }).filter(Boolean).join('\n');
+    const original = entry.original.trim();
+    const translation = entry.translation.trim();
+    if (!original && !translation) return '';
+    const cite = entry.segmentId ? ` [[seg:${entry.segmentId}]]` : '';
+    const speaker = entry.speaker ? ` ${entry.speaker}` : '';
+    const lines = [`[${entry.timestamp}]${speaker}${cite}`];
+    if (original) lines.push(`原文: ${original}`);
+    if (translation) lines.push(`译文: ${translation}`);
+    return lines.join('\n');
+  }).filter(Boolean).join('\n\n');
 }
 
 export function chunkEntries(entries: SummaryEntry[], maxChars = 6000) {
@@ -61,19 +70,19 @@ function span(entries: SummaryEntry[]) {
 export function buildRequestMessages(entries: SummaryEntry[], template: SummaryTemplate, outputLanguage: string, chunk?: { index: number; total: number }) {
   if (!chunk) {
     return [
-      { role: 'system' as const, content: fill(TEMPLATES[template], { lang: outputLanguage }) },
-      { role: 'user' as const, content: `以下是完整会议记录：\n\n${entriesToText(entries)}` }
+      { role: 'system' as const, content: `${fill(TEMPLATES[template], { lang: outputLanguage })}\n${SOURCE_RULE}` },
+      { role: 'user' as const, content: `以下是完整${RECORD_LABEL[template]}。原文和译文都要作为依据：\n\n${entriesToText(entries)}` }
     ];
   }
   return [
-    { role: 'system' as const, content: fill(CHUNK_PROMPT, { kind: KIND[template], index: String(chunk.index), total: String(chunk.total), span: span(entries), lang: outputLanguage }) },
+    { role: 'system' as const, content: `${fill(CHUNK_PROMPT, { kind: KIND[template], index: String(chunk.index), total: String(chunk.total), span: span(entries), lang: outputLanguage })}\n${SOURCE_RULE}\n${fill(TEMPLATES[template], { lang: outputLanguage })}` },
     { role: 'user' as const, content: entriesToText(entries) }
   ];
 }
 
 export function buildMergeMessages(parts: string[], template: SummaryTemplate, outputLanguage: string, spanAll: string) {
   const joined = parts.map((text, index) => `### 第 ${index + 1} 部分\n\n${text}`).join('\n\n---\n\n');
-  const system = fill(MERGE_PROMPT, { kind: KIND[template], span: spanAll, total: String(parts.length), lang: outputLanguage });
+  const system = `${fill(MERGE_PROMPT, { kind: KIND[template], span: spanAll, total: String(parts.length), lang: outputLanguage })}\n${SOURCE_RULE}`;
   return [
     { role: 'system' as const, content: system },
     { role: 'user' as const, content: `${fill(TEMPLATES[template], { lang: outputLanguage })}\n\n分段提取结果：\n\n${joined}` }
@@ -118,7 +127,7 @@ export async function summarize(entries: SummaryEntry[], options: {
   const usable = entries.filter((entry) => entry.original.trim() || entry.translation.trim());
   if (!usable.length) throw new SummaryError('empty', '这条记录没有可总结的文本。');
   await ensureActive(options.signal, options.shouldStop);
-  const template = options.template === 'classroom' ? 'classroom' : 'meeting';
+  const template = SUMMARY_TEMPLATES.includes(options.template) ? options.template : 'meeting';
   const chunks = chunkEntries(usable, maxChars);
   if (chunks.length <= 1) {
     const result = (await options.chat(buildRequestMessages(usable, template, options.outputLanguage), options.signal)).trim();

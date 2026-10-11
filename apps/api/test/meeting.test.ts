@@ -384,10 +384,19 @@ test('long records are chunked and then merged', async () => {
   assert.equal(merged, '最终笔记');
   const single = buildRequestMessages([{ timestamp: '00:00:01', original: '甲', translation: 'A' }], 'meeting', '中文');
   assert.match(single[0]?.content ?? '', /会议概述/);
-  assert.match(single[1]?.content ?? '', /\[00:00:01\] A/);
+  assert.match(single[1]?.content ?? '', /\[00:00:01\]/);
+  assert.match(single[1]?.content ?? '', /原文: 甲/);
+  assert.match(single[1]?.content ?? '', /译文: A/);
   const merge = buildMergeMessages(['甲', '乙'], 'meeting', '中文', '00:00:01 – 00:10:00');
   assert.match(merge[1]?.content ?? '', /第 1 部分/);
   assert.match(merge[1]?.content ?? '', /第 2 部分/);
+  for (const template of ['meeting', 'classroom', 'interview', 'briefing'] as const) {
+    const messages = buildRequestMessages([{ timestamp: '00:00:01', original: '积分', translation: 'integral', segmentId: '11111111-1111-4111-8111-111111111111' }], template, '中文');
+    assert.match(messages[0]?.content ?? '', template === 'meeting' ? /会议概述/ : template === 'classroom' ? /课程主题/ : template === 'interview' ? /访谈对象/ : /一句话结论/);
+    assert.doesNotMatch(messages[0]?.content ?? '', template === 'classroom' ? /会议概述/ : /$^/);
+    assert.match(messages[1]?.content ?? '', /原文: 积分/);
+    assert.match(messages[1]?.content ?? '', /\[\[seg:11111111-1111-4111-8111-111111111111\]\]/);
+  }
 });
 
 test('one-way soniox config hints only the spoken language', () => {

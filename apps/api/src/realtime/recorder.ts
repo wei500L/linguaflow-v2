@@ -68,6 +68,13 @@ export class SessionRecorder {
     markLiveRecording(recordingRelative(this.userId, this.sessionId, 'wav'));
   }
 
+  async rewriteHeader() {
+    if (this.stopped || !this.handle) return;
+    await this.chain;
+    const even = this.bytes - (this.bytes % 2);
+    await this.handle.write(wavHeader(even), 0, 44, 0);
+  }
+
   push(chunk: Buffer) {
     if (this.stopped || !this.handle || chunk.length === 0) return;
     const copy = Buffer.from(chunk);

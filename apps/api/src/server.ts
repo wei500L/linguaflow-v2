@@ -11,13 +11,17 @@ import { billingRoutes } from './routes/billing.js';
 import { adminRoutes } from './routes/admin.js';
 import { shareRoutes } from './routes/shares.js';
 import { liveRoutes } from './routes/live.js';
+import { courseRoutes } from './routes/courses.js';
+import { supportRoutes } from './routes/support.js';
+import { purgeExpiredTrash } from './lib/trash.js';
+import { EVENT_RETAIN_MS } from '@linguaflow/shared';
 import { closeActiveSession, closeActiveSessions, hasLiveRoom, roomHeardRecently } from './realtime/proxy.js';
 import { drainRecordingEncodes, resumeRecordingEncodes } from './realtime/encode.js';
+import { protectedRecordingPaths, recoverStaleSessions } from './realtime/persist.js';
 import { sweepOrphanRecordings } from './lib/recordings.js';
 import { db, sql } from './db/index.js';
-import { realtimeSessions, transcripts } from './db/schema.js';
+import { productEvents, realtimeSessions, transcripts } from './db/schema.js';
 import { and, asc, eq, gt, isNotNull, isNull, lt } from 'drizzle-orm';
-import { settleUsage } from './lib/quota.js';
 import { replayDueReferrals } from './lib/referral.js';
 import { accessStillValid } from './auth/access.js';
 import { bootstrapOwner, findUserById } from './auth/service.js';
@@ -69,6 +73,8 @@ await app.register(billingRoutes);
 await app.register(adminRoutes);
 await app.register(shareRoutes);
 await app.register(liveRoutes);
+await app.register(courseRoutes);
+await app.register(supportRoutes);
 
 async function referencedRecordingPaths() {
   const paths: string[] = [];
@@ -82,6 +88,7 @@ async function referencedRecordingPaths() {
     if (page.length < 500) break;
     cursor = page[page.length - 1].id;
   }
+  paths.push(...await protectedRecordingPaths());
   return paths;
 }
 
@@ -91,15 +98,12 @@ const cleanupTimer = setInterval(async () => {
     await db.update(realtimeSessions).set({ endedAt: new Date(), endReason: 'expired', status: 'expired' }).where(and(eq(realtimeSessions.status, 'pending'), lt(realtimeSessions.createdAt, cutoff), isNull(realtimeSessions.endedAt)));
     const stale = await db.select().from(realtimeSessions).where(and(eq(realtimeSessions.status, 'active'), lt(realtimeSessions.claimedAt, cutoff), isNull(realtimeSessions.endedAt)));
     await Promise.allSettled(stale.map(async (session) => {
-      if (roomHeardRecently(session.id)) return;
-      const closed = await closeActiveSession(session.id, 'expired');
-      if (!closed) await settleUsage(session.userId, session.id, session.startedAt ? (Date.now() - session.startedAt.getTime()) / 1000 : 0, 'expired');
+      if (roomHeardRecently(session.id) || hasLiveRoom(session.id)) return;
+      await closeActiveSession(session.id, 'expired');
     }));
-    const reconnecting = await db.select().from(realtimeSessions).where(and(eq(realtimeSessions.status, 'reconnecting'), lt(realtimeSessions.claimedAt, new Date(Date.now() - 2 * 60 * 1000)), isNull(realtimeSessions.endedAt)));
-    await Promise.allSettled(reconnecting.map(async (session) => {
-      if (hasLiveRoom(session.id)) return;
-      await settleUsage(session.userId, session.id, session.startedAt ? (Date.now() - session.startedAt.getTime()) / 1000 : 0, 'expired');
-    }));
+    await recoverStaleSessions(hasLiveRoom);
+    await purgeExpiredTrash();
+    await db.delete(productEvents).where(lt(productEvents.createdAt, new Date(Date.now() - EVENT_RETAIN_MS)));
     await replayDueReferrals();
     await sweepOrphanRecordings(await referencedRecordingPaths());
   } catch (error) {
@@ -118,8 +122,7 @@ app.setErrorHandler((error: any, _request, reply) => {
 });
 
 if (config.bootstrapEmail && config.bootstrapPassword) await bootstrapOwner(config.bootstrapEmail, config.bootstrapPassword);
-const interrupted = await db.select().from(realtimeSessions).where(and(eq(realtimeSessions.status, 'reconnecting'), isNull(realtimeSessions.endedAt)));
-await Promise.allSettled(interrupted.map((session) => settleUsage(session.userId, session.id, session.startedAt ? (Date.now() - session.startedAt.getTime()) / 1000 : 0, 'server_restart')));
+await recoverStaleSessions(hasLiveRoom);
 await markInterruptedSummaries();
 await resumeRecordingEncodes();
 assertProductionReady();

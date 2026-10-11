@@ -36,7 +36,7 @@ export async function liveRoutes(app: FastifyInstance) {
     }
     if (phase !== 'ended') return { phase, ...meta };
     const [transcript] = await db.select().from(transcripts).where(eq(transcripts.sessionId, session.id)).limit(1);
-    if (!transcript) return { phase: 'ended', ...meta, empty: true };
+    if (!transcript || transcript.deletedAt || transcript.recordStatus !== 'complete' || !session.audienceKeepAfter) return { phase: 'ended', ...meta, empty: true };
     await ensureAudienceShare(session, transcript.id);
     return { phase: 'ended', ...meta, empty: false };
   });

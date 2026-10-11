@@ -2,7 +2,7 @@ import { PLANS, REFERRAL, splitQuotaCharge, summaryChargeSeconds, type Entitleme
 import { and, eq, inArray, sql as query } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { deviceClaims, entitlements, realtimeSessions, referrals, usageLedger, users } from '../db/schema.js';
-import { claimBlocks, claimKeys, freeDeviceBlockedMessage, serverClaimKeys, type DeviceRef } from './device.js';
+import { claimBlocks, claimKeys, freeDeviceBlockedMessage, freeDomainBlockedMessage, serverClaimKeys, type DeviceRef } from './device.js';
 
 const addMonth = (date: Date) => new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, date.getUTCDate()));
 
@@ -41,8 +41,10 @@ export async function holdFreeDevice(tx: ClaimExecutor, userId: string, fingerpr
   const now = new Date();
   await tx.insert(deviceClaims).values(keys.map((key) => ({ key, claimedBy: userId, claimedAt: now, releasedAt: null }))).onConflictDoNothing({ target: deviceClaims.key });
   const rows = await tx.select().from(deviceClaims).where(inArray(deviceClaims.key, keys)).for('update');
-  if (rows.some((row) => claimBlocks({ userId: row.claimedBy, releasedAt: row.releasedAt, key: row.key, claimedAt: row.claimedAt }, userId, now))) {
-    throw Object.assign(new Error(freeDeviceBlockedMessage), { statusCode: 403, code: 'free_device_blocked' });
+  const blocking = rows.filter((row) => claimBlocks({ userId: row.claimedBy, releasedAt: row.releasedAt, key: row.key, claimedAt: row.claimedAt }, userId, now));
+  if (blocking.length) {
+    const reason = blocking.every((row) => row.key.startsWith('dom:')) ? 'domain' : 'device';
+    throw Object.assign(new Error(reason === 'domain' ? freeDomainBlockedMessage : freeDeviceBlockedMessage), { statusCode: 403, code: 'free_device_blocked', reason });
   }
   const take = rows.filter((row) => row.releasedAt || (row.key.startsWith('ip:') && row.claimedBy !== userId)).map((row) => row.key);
   if (take.length) await tx.update(deviceClaims).set({ claimedBy: userId, claimedAt: now, releasedAt: null }).where(inArray(deviceClaims.key, take));
@@ -111,6 +113,24 @@ export async function reserveSummaryUsage(userId: string, transcriptId: string, 
     if (split.planSeconds) await tx.insert(usageLedger).values({ userId, transcriptId, seconds: split.planSeconds, source: 'plan', kind: 'summary', status: 'held' });
     if (split.addonSeconds) await tx.insert(usageLedger).values({ userId, transcriptId, seconds: split.addonSeconds, source: 'addon', kind: 'summary', status: 'held' });
     return { seconds: requested };
+  });
+}
+
+export async function reserveQuotedSummary(userId: string, transcriptId: string, seconds: number, device?: DeviceRef | null) {
+  if (seconds <= 0) return { seconds: 0 };
+  const row = await ensureEntitlement(userId);
+  return db.transaction(async (tx) => {
+    const [locked] = await tx.select().from(entitlements).where(eq(entitlements.userId, userId)).for('update');
+    const split = splitQuotaCharge(seconds, remainingSeconds(locked), locked.addonSeconds);
+    if (!split.covered) throw Object.assign(new Error('平台纪要额度不足。'), { statusCode: 402, code: 'quota_exhausted' });
+    if (locked.plan === 'free' && split.planSeconds > 0) await holdFreeDevice(tx, userId, device?.fingerprintHash ?? null, device?.deviceId ?? null, device?.strong !== false);
+    await tx.update(entitlements).set({
+      usedSecondsThisPeriod: query`${entitlements.usedSecondsThisPeriod} + ${split.planSeconds}`,
+      addonSeconds: query`${entitlements.addonSeconds} - ${split.addonSeconds}`
+    }).where(eq(entitlements.userId, userId));
+    if (split.planSeconds) await tx.insert(usageLedger).values({ userId, transcriptId, seconds: split.planSeconds, source: 'plan', kind: 'summary', status: 'held' });
+    if (split.addonSeconds) await tx.insert(usageLedger).values({ userId, transcriptId, seconds: split.addonSeconds, source: 'addon', kind: 'summary', status: 'held' });
+    return { seconds, plan: row.plan };
   });
 }
 

@@ -3,6 +3,7 @@ import { eq, and } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { transcripts } from '../db/schema.js';
 import { resolveRecording } from '../lib/recordings.js';
+import { repairWavFile } from './wav-repair.js';
 import { transcodeWav } from './recorder.js';
 
 const pending = new Set<Promise<void>>();
@@ -30,12 +31,13 @@ export async function drainRecordingEncodes(timeoutMs = 15_000) {
 
 async function encodeRecording(transcriptId: string) {
   const [row] = await db.select().from(transcripts).where(eq(transcripts.id, transcriptId));
-  if (!row || row.audioStatus !== 'encoding' || !row.audioRelPath) return;
+  if (!row || row.deletedAt || row.audioStatus !== 'encoding' || !row.audioRelPath) return;
   const wavRel = wavRelative(row.audioRelPath);
   const mp3Rel = wavRel.replace(/\.wav$/i, '.mp3');
   const wavPath = resolveRecording(wavRel);
   const mp3Path = resolveRecording(mp3Rel);
   if (!wavPath || !mp3Path) return;
+  if (wavRel.endsWith('.wav')) await repairWavFile(wavRel).catch(() => null);
   const wavInfo = await stat(wavPath).catch(() => null);
   const mp3Info = await stat(mp3Path).catch(() => null);
   if (!wavInfo && mp3Info) {
