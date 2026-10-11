@@ -21,6 +21,8 @@ type ShareData = {
   summaryMarkdown: string | null;
   audioUrl: string | null;
   segments: ShareSegment[];
+  gaps?: Array<{ id: string; source: string; precision: string }>;
+  summaryCitationHashes?: Record<string, string> | null;
 };
 
 function formatClockMs(ms: number) {
@@ -177,8 +179,8 @@ export function SharePage({ token }: { token: string }) {
       const small = view === 'both' && translation && source ? source : '';
       const metaLine = [segment.speaker ? `${tr('说话人')} ${segment.speaker}` : '', segment.startMs !== null ? formatClockMs(segment.startMs) : ''].filter(Boolean).join(' · ');
       const body = <>{metaLine && <span className="caption-meta">{metaLine}</span>}<p>{big || '…'}</p>{small && <strong>{small}</strong>}</>;
-      if (data.audioUrl && segment.startMs !== null) return <button type="button" className={`caption-row seekable${active ? ' active' : ''}${right ? ' right' : ''}`} key={segment.id} ref={active ? activeRef : undefined} onClick={() => seekTo(segment.startMs)}>{body}</button>;
-      return <article className={`caption-row${active ? ' active' : ''}${right ? ' right' : ''}`} key={segment.id}>{body}</article>;
+      if (data.audioUrl && segment.startMs !== null) return <button type="button" data-segment={segment.id} className={`caption-row seekable${active ? ' active' : ''}${right ? ' right' : ''}`} key={segment.id} ref={active ? activeRef : undefined} onClick={() => seekTo(segment.startMs)}>{body}</button>;
+      return <article data-segment={segment.id} className={`caption-row${active ? ' active' : ''}${right ? ' right' : ''}`} key={segment.id}>{body}</article>;
     })}
   </section>;
 
@@ -195,11 +197,12 @@ export function SharePage({ token }: { token: string }) {
       {exportError && <p className="form-message" role="alert">{exportError}</p>}
       {notice && <p className="live-notice" role="status">{notice}</p>}
       {classroom && captionSection}
-      {data.summaryMarkdown && <section>
+        {data.summaryMarkdown && <section>
         <h2>{tr('纪要')}</h2>
         {tasks.length > 0 && <div className="task-box"><div className="task-head"><strong>{tr('待办')}</strong><button type="button" className="link-button" onClick={() => { void navigator.clipboard.writeText(tasks.map((item) => `- ${item.done ? '[x] ' : ''}${item.text}`).join('\n')).then(() => setNotice(tr('待办已复制。'))).catch(() => setExportError(tr('当前浏览器不允许复制，请手动选择文本。'))); }}>{tr('复制待办')}</button></div>{tasks.map((task) => <label key={task.id}><input type="checkbox" checked={task.done} readOnly /><span>{task.text}</span></label>)}</div>}
-        <div className="summary-view">{renderSummary(data.summaryMarkdown)}</div>
+        <div className="summary-view">{renderSummary(data.summaryMarkdown, { segments: data.scope === 'summary' ? [] : data.segments, hashes: data.summaryCitationHashes, onSeek: data.scope === 'summary' ? undefined : (_id, startMs) => seekTo(startMs) })}</div>
       </section>}
+      {data.gaps?.length ? <p className="share-meta">{data.gaps.map((gap) => `${gap.source === 'user_pause' ? tr('主动暂停') : tr('内容缺口')}（${gap.precision === 'unknown' ? tr('不确定') : gap.precision}）`).join(' · ')}</p> : null}
       {!classroom && captionSection}
       {classroom && exportBlock}
     </section>}

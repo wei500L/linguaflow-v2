@@ -234,7 +234,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const adminId = (request.user as { sub: string }).sub;
     const { id } = request.params as { id: string };
     const closed = await closeActiveSession(id, 'admin_terminated');
-    if (!closed) await finalizePersistedSession(id, 'admin_terminated');
+    if (!closed) await finalizePersistedSession(id, 'admin_terminated', { interrupted: true });
     await db.insert(adminAudit).values({ adminId, action: 'realtime_session_terminated', payloadJson: { sessionId: id } });
     return reply.code(204).send();
   });
@@ -245,7 +245,7 @@ export async function adminRoutes(app: FastifyInstance) {
     const from = queryParams.from ? new Date(queryParams.from) : new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000);
     if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return { empty: true, counts: {}, rates: {}, latency: { samples: 0, sessions: 0, recognitionP50: null, recognitionP95: null, translationP50: null, translationP95: null } };
     const rows = await db.select().from(productEvents).where(and(gte(productEvents.createdAt, from), lt(productEvents.createdAt, to))).limit(5000);
-    return summarizeProductMetrics(rows.map((row) => ({ name: row.name, createdAtMs: row.createdAt.getTime(), props: row.props ?? {} })), from.getTime(), to.getTime());
+    return summarizeProductMetrics(rows.map((row) => ({ name: row.name, createdAtMs: row.createdAt.getTime(), userId: row.userId, props: row.props ?? {} })), from.getTime(), to.getTime(), { truncated: rows.length >= 5000 });
   });
 
   await adminSupportRoutes(app);

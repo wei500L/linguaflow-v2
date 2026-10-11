@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { api } from './lib/api';
 import { tr, useLang } from './lib/i18n';
 import { LanguageToggle } from './language-toggle';
@@ -22,6 +22,9 @@ export function HelpPage() {
   const [includeDiag, setIncludeDiag] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [requests, setRequests] = useState<Array<{ id: string; kind: string; category: string; status: string; resolution: string | null }>>([]);
+  const [requestsReady, setRequestsReady] = useState(false);
+  useEffect(() => { void api<Array<{ id: string; kind: string; category: string; status: string; resolution: string | null }>>('/v1/support').then((rows) => { setRequests(rows); setRequestsReady(true); }).catch(() => setRequestsReady(false)); }, [message]);
   const diagnostics = { language: navigator.language, online: String(navigator.onLine), viewport: `${window.innerWidth}x${window.innerHeight}` };
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -56,6 +59,9 @@ export function HelpPage() {
       </form>
       {message && <p role="status">{message}</p>}
       {error && <p className="form-message" role="alert">{error}</p>}
+      {requestsReady && <h2>{tr('我的申请')}</h2>}
+      {requestsReady && requests.length === 0 && <p>{tr('还没有申请。')}</p>}
+      {requestsReady && requests.map((item) => <p key={item.id}>{item.category} · {item.status}{item.resolution ? ` · ${item.resolution}` : ''}</p>)}
     </article>
   </main>;
 }

@@ -201,7 +201,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
     const [session] = await db.select().from(realtimeSessions).where(and(eq(realtimeSessions.id, id), eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt)));
     if (session) {
       const closed = await closeActiveSession(id, 'cancelled');
-      if (!closed) await finalizePersistedSession(id, 'cancelled');
+      if (!closed) await finalizePersistedSession(id, 'cancelled', { interrupted: true });
     }
     return reply.code(204).send();
   });

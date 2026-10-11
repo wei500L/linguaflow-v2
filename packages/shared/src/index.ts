@@ -38,6 +38,8 @@ export type RealtimeEvent =
   | { type: 'snapshot'; tokens: TranscriptToken[]; speakerNames?: Record<string, string> }
   | { type: 'error'; code: string; message?: string }
   | { type: 'save_status'; status: 'saved' | 'failed'; savedThrough: string | null; checkpointSeq: number }
+  | { type: 'marker_ack'; id: string; ok: boolean }
+  | { type: 'gap_ack'; id: string; ok: boolean }
   | { type: 'finished'; reason?: string; transcriptId?: string | null; outcome?: 'saved' | 'empty' | 'partial' | 'failed' | 'in_progress' };
 
 const sentenceBoundary = /(?<=[。！？!?．.…])\s*/;

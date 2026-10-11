@@ -11,7 +11,7 @@ import { lockProgrammaticScroll, nudgeToBottom } from './lib/follow-scroll';
 import { InvitePanel } from './invite-panel';
 import { captureInvite } from './lib/invite';
 import { getLang, tr, useLang } from './lib/i18n';
-import { alignSentAudio, commitSentChunk, createLatencyClock, observeTranscript, readLatency, sameReadout, stampChunk, startMeasuring, type LatencyClock, type LatencyReadout } from './lib/latency';
+import { alignSentAudio, commitSentChunk, createLatencyClock, emptyLatencySamples, latencySampleProps, observeTranscript, pushLatencySample, readLatency, sameReadout, stampChunk, startMeasuring, type LatencyClock, type LatencyReadout } from './lib/latency';
 import { CourseBar } from './course-bar';
 import { HelpPage } from './help-page';
 import { LegalPage, MarketingPage } from './marketing';
@@ -79,11 +79,11 @@ function App() {
   const [sessionTitle, setSessionTitle] = useState(''); const [closePrompt, setClosePrompt] = useState(false); const [liveSessionId, setLiveSessionId] = useState<string | null>(null);
   const [showGuide, setShowGuide] = useState(() => localStorage.getItem('linguaflow_seen_guide') !== '1'); const [captionView, setCaptionView] = useState<CaptionView>(() => { const saved = localStorage.getItem('linguaflow_caption_view'); return saved === 'translation' || saved === 'source' ? saved : 'both'; });
   const [speakerNames, setSpeakerNames] = useState<Record<string, string>>({}); const [namingSpeaker, setNamingSpeaker] = useState<string | null>(null); const [speakerDraft, setSpeakerDraft] = useState('');
-  const [mics, setMics] = useState<Array<{ id: string; label: string }>>([]); const [micId, setMicId] = useState(() => localStorage.getItem('linguaflow_mic') || ''); const [liveNotice, setLiveNotice] = useState(''); const [savedNote, setSavedNote] = useState(''); const [savedThrough, setSavedThrough] = useState<string | null>(null); const [saveState, setSaveState] = useState<'saved' | 'failed' | 'pending'>('pending');
+  const [mics, setMics] = useState<Array<{ id: string; label: string }>>([]); const [micId, setMicId] = useState(() => localStorage.getItem('linguaflow_mic') || ''); const [liveNotice, setLiveNotice] = useState(''); const [savedNote, setSavedNote] = useState(''); const [savedThrough, setSavedThrough] = useState<string | null>(null); const [saveState, setSaveState] = useState<'saved' | 'failed' | 'pending'>('pending'); const [liveGaps, setLiveGaps] = useState<string[]>([]);
   const [audioStalled, setAudioStalled] = useState(false); const sessionReady = useRef(false);
   const acceptAudio = useRef(false); const userStop = useRef(false); const recoverLock = useRef(false); const readyWait = useRef<((ok: boolean) => void) | null>(null); const speakerNamesRef = useRef<Record<string, string>>({}); const closeTitleRef = useRef('');
   const limitSeconds = useRef<number | null>(null); const readyAt = useRef<number | null>(null); const savedTranscriptId = useRef<string | null>(null); const finishOutcome = useRef<string | null>(null); const stopLock = useRef<Promise<void> | null>(null);
-  const statusRef = useRef<SessionStatus>('idle'); const generation = useRef(0); const authToken = useRef(getToken()); const sessionId = useRef<string | null>(null); const socket = useRef<WebSocket | null>(null); const audio = useRef<{ stop: () => Promise<void> } | null>(null); const keepalive = useRef<number | null>(null); const startupTimer = useRef<number | null>(null); const drain = useRef<(() => void) | null>(null); const upstreamDone = useRef(false); const audioQueue = useRef<Array<{ pcm: ArrayBuffer; durationMs: number; capturedAt: number }>>([]); const latencyClock = useRef<LatencyClock>(createLatencyClock()); const [latency, setLatency] = useState<LatencyReadout>(NO_LATENCY);
+  const statusRef = useRef<SessionStatus>('idle'); const generation = useRef(0); const authToken = useRef(getToken()); const sessionId = useRef<string | null>(null); const socket = useRef<WebSocket | null>(null); const audio = useRef<{ stop: () => Promise<void> } | null>(null); const keepalive = useRef<number | null>(null); const startupTimer = useRef<number | null>(null); const drain = useRef<(() => void) | null>(null); const upstreamDone = useRef(false); const audioQueue = useRef<Array<{ pcm: ArrayBuffer; durationMs: number; capturedAt: number }>>([]); const latencyClock = useRef<LatencyClock>(createLatencyClock()); const latencySamples = useRef(emptyLatencySamples()); const [latency, setLatency] = useState<LatencyReadout>(NO_LATENCY);
   const running = sessionStatus === 'running'; const busySession = sessionStatus !== 'idle';
   function updateSessionStatus(next: SessionStatus) { statusRef.current = next; setSessionStatus(next); }
   useEffect(() => { const expire = () => { void stop(); clearToken(); setAuthenticated(false); }; window.addEventListener('linguaflow:auth-expired', expire); const timer = window.setInterval(() => { if (getToken() && isTokenExpired()) expire(); }, 30_000); return () => { window.removeEventListener('linguaflow:auth-expired', expire); window.clearInterval(timer); }; }, []);
@@ -197,6 +197,7 @@ function App() {
     if (!sessionLive) return;
     const tick = () => {
       const next = readLatency(latencyClock.current, performance.now(), !paused && !audioStalled);
+      pushLatencySample(latencySamples.current, next);
       setLatency((current) => sameReadout(current, next) ? current : next);
     };
     tick();
@@ -293,6 +294,7 @@ function App() {
       const next = audioQueue.current.shift();
       if (!next) continue;
       socket.send(next.pcm);
+      sentAudioMs.current += next.durationMs;
       commitSentChunk(latencyClock.current, next);
     }
   }
@@ -314,7 +316,8 @@ function App() {
     const queuedBefore = audioQueue.current.reduce((sum, item) => sum + item.durationMs, 0);
     trimQueuedAudio(audioQueue.current);
     const droppedMs = queuedBefore - audioQueue.current.reduce((sum, item) => sum + item.durationMs, 0);
-    if (droppedMs > 0) sendControl({ type: 'gap', id: crypto.randomUUID(), source: 'queue_overflow', wallStartMs: null, wallEndMs: null, audioStartMs: 0, audioEndMs: droppedMs, precision: 'estimated' });
+    const audioAt = sentAudioMs.current;
+    if (droppedMs > 0) sendControl({ type: 'gap', id: crypto.randomUUID(), source: 'queue_overflow', wallStartMs: wallClock(), wallEndMs: wallClock(), audioStartMs: audioAt, audioEndMs: audioAt + droppedMs, precision: 'estimated' });
     if (acceptAudio.current) pumpAudio(socket.current);
   }
   function bindSocket(ws: WebSocket) {
@@ -330,12 +333,22 @@ function App() {
           if (data.status === 'failed') showProblem(tr('字幕暂时没能保存。请结束这次翻译，已收到的内容会按最后一次成功保存处理。'));
           return;
         }
+        if (data.type === 'marker_ack' || data.type === 'gap_ack') {
+          const label = controlLabels.current.get(data.id);
+          controlLabels.current.delete(data.id);
+          if (data.type === 'gap_ack' && data.ok && label) setLiveGaps((current) => current.includes(label) ? current : [...current, label]);
+          setLiveNotice(data.ok ? (data.type === 'marker_ack' ? tr('标记已保存。') : tr('缺口已记录。')) : tr('没有保存成功，请再试一次。'));
+          return;
+        }
         if (data.type === 'ready') {
+          if (wallOrigin.current == null) wallOrigin.current = Date.now();
           if (typeof data.allowedSeconds === 'number') { limitSeconds.current = data.allowedSeconds; readyAt.current = Date.now(); }
           if (typeof data.receivedAudioMs === 'number') alignSentAudio(latencyClock.current, data.receivedAudioMs);
           if (!sessionReady.current) startMeasuring(latencyClock.current, performance.now());
           sessionReady.current = true;
           acceptAudio.current = true;
+          const queued = pendingControls.current.splice(0);
+          for (const item of queued) ws.send(JSON.stringify(item));
           pumpAudio(ws);
           if (keepalive.current !== null) window.clearInterval(keepalive.current);
           keepalive.current = window.setInterval(() => { if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'keepalive' })); }, 10_000);
@@ -454,7 +467,7 @@ function App() {
     setAudioStalled(false);
     speakerNamesRef.current = {};
     setSpeakerNames({}); setNamingSpeaker(null); setLiveNotice(''); setClosePrompt(false); closeTitleRef.current = sessionTitle.trim().slice(0, 120);
-    showProblem(''); setSavedNote(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; latencyClock.current = createLatencyClock(); setLatency(NO_LATENCY); savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null;
+    showProblem(''); setSavedNote(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; latencyClock.current = createLatencyClock(); setLatency(NO_LATENCY); savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null; wallOrigin.current = null; sentAudioMs.current = 0; pendingControls.current = []; latencySamples.current = emptyLatencySamples(); setLiveGaps([]);
     updateSessionStatus('opening');
     try {
       if (!await ensureAudio(id)) return;
@@ -506,6 +519,11 @@ function App() {
     if (statusRef.current === 'idle' || statusRef.current === 'stopping' || statusRef.current === 'saving') return;
     userStop.current = true;
     acceptAudio.current = false;
+    closeOpenPause();
+    if (suspendStarted.current != null) {
+      sendControl({ type: 'gap', id: crypto.randomUUID(), source: 'system_suspend', wallStartMs: suspendStarted.current, wallEndMs: wallClock(), audioStartMs: sentAudioMs.current, audioEndMs: sentAudioMs.current, precision: 'estimated' });
+      suspendStarted.current = null;
+    }
     setClosePrompt(false);
     readyWait.current?.(false);
     readyWait.current = null;
@@ -531,6 +549,9 @@ function App() {
     socket.current = null;
     if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) ws.close();
     const id = sessionId.current; sessionId.current = null;
+    const latencyProps = latencySampleProps(latencySamples.current);
+    latencySamples.current = emptyLatencySamples();
+    if (id && latencyProps && getToken()) void api('/v1/events', { method: 'POST', body: JSON.stringify({ name: 'latency_sample', dedupeKey: `latency:${id}`, props: { sessionId: id, ...latencyProps } }) }).catch(() => undefined);
     let confirmed = id && getToken() ? await readSavedSession(id) : null;
     if (id && getToken() && !confirmed?.endedAt) {
       await api(`/v1/realtime/sessions/${id}`, { method: 'DELETE' }).catch(() => undefined);
@@ -645,24 +666,43 @@ function App() {
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: 'speakers', names: next }));
   }
   const pauseStarted = useRef<number | null>(null);
-  function sendControl(payload: unknown) {
+  const wallOrigin = useRef<number | null>(null);
+  const sentAudioMs = useRef(0);
+  const pendingControls = useRef<Array<Record<string, unknown>>>([]);
+  const controlLabels = useRef(new Map<string, string>());
+  const suspendStarted = useRef<number | null>(null);
+  function wallClock() { return wallOrigin.current == null ? null : Date.now() - wallOrigin.current; }
+  function sendControl(payload: Record<string, unknown>) {
+    if (payload.type === 'gap' && typeof payload.id === 'string') {
+      const source = payload.source === 'user_pause' ? tr('主动暂停') : payload.source === 'system_suspend' ? tr('系统暂停') : tr('内容缺口');
+      controlLabels.current.set(payload.id, source);
+    }
     if (socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify(payload));
+    else pendingControls.current.push(payload);
+  }
+  function closeOpenPause() {
+    if (pauseStarted.current == null) return;
+    sendControl({ type: 'gap', id: crypto.randomUUID(), source: 'user_pause', wallStartMs: pauseStarted.current, wallEndMs: wallClock(), audioStartMs: sentAudioMs.current, audioEndMs: sentAudioMs.current, precision: wallClock() == null ? 'unknown' : 'exact' });
+    pauseStarted.current = null;
   }
   function togglePause() {
     const next = !pausedRef.current;
     pausedRef.current = next;
     setPaused(next);
-    const wall = readyAt.current ? Date.now() - readyAt.current : null;
-    if (next) pauseStarted.current = wall;
-    else if (pauseStarted.current != null) {
-      sendControl({ type: 'gap', id: crypto.randomUUID(), source: 'user_pause', wallStartMs: pauseStarted.current, wallEndMs: wall, audioStartMs: null, audioEndMs: null, precision: wall == null ? 'unknown' : 'exact' });
-      pauseStarted.current = null;
-    }
+    if (next) pauseStarted.current = wallClock();
+    else closeOpenPause();
   }
   function addMarker(kind: 'important' | 'unclear' | 'assignment') {
-    sendControl({ type: 'marker', id: crypto.randomUUID(), kind, wallMs: readyAt.current ? Date.now() - readyAt.current : null, audioMs: null });
-    setLiveNotice(kind === 'important' ? tr('已标为重点。') : kind === 'unclear' ? tr('已标为没听懂。') : tr('已标为作业。'));
+    sendControl({ type: 'marker', id: crypto.randomUUID(), kind, wallMs: wallClock(), audioMs: sentAudioMs.current });
+    setLiveNotice(tr('正在保存标记…'));
   }
+  useEffect(() => {
+    if (!sessionLive) return;
+    if (audioStalled) { suspendStarted.current = wallClock(); return; }
+    if (suspendStarted.current == null) return;
+    sendControl({ type: 'gap', id: crypto.randomUUID(), source: 'system_suspend', wallStartMs: suspendStarted.current, wallEndMs: wallClock(), audioStartMs: sentAudioMs.current, audioEndMs: sentAudioMs.current, precision: 'estimated' });
+    suspendStarted.current = null;
+  }, [audioStalled, sessionLive]);
   async function toggleFullscreen() {
     const node = stageRef.current?.parentElement;
     if (!node) return;
@@ -705,9 +745,9 @@ function App() {
     routeEnded && routeEnded.id === routeSessionId && sessionStatus === 'idle' ? { id: 'route-ended', node: <div className="session-saved" role="status"><span>{tr('这场翻译已经结束，无法恢复。')}</span>{routeEnded.transcriptId && <button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(routeEnded.transcriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button>}<button type="button" className="link-button" onClick={() => replacePath('/')}>{tr('回到工作区')}</button></div> } : null,
     conflictSession && sessionStatus === 'idle' ? { id: 'conflict', node: <div className="record-notice" role="status"><p>{tr('上一场翻译还在占用额度。')}</p><button type="button" className="primary-button" onClick={() => void resumeConflict()}>{tr('恢复这场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(false)}>{tr('结束上一场')}</button><button type="button" className="secondary-button" onClick={() => void endConflict(true)}>{tr('结束上一场并开始')}</button></div> } : null,
     endedTranscriptId && sessionStatus === 'idle' ? { id: 'saved', node: <div className="session-saved" role="status"><span>{savedNote || tr('本次记录已保存。')}</span><button type="button" className="primary-button" onClick={() => { setFocusTranscriptId(endedTranscriptId); setPanel('transcripts'); }}>{tr('查看本次记录')}</button><button type="button" className="link-button" onClick={() => { setEndedTranscriptId(null); setSavedNote(''); }}>{tr('关闭')}</button></div> } : null,
-    sessionLive && savedThrough ? { id: 'checkpoint', node: <div className="session-saved" role="status"><span>{saveState === 'failed' ? tr('保存失败') : tr('已保存到 {time}').replace('{time}', new Date(savedThrough).toLocaleTimeString())}</span><span className="list-item-actions"><button type="button" className="link-button" onClick={() => addMarker('important')}>{tr('重点')}</button><button type="button" className="link-button" onClick={() => addMarker('unclear')}>{tr('没听懂')}</button><button type="button" className="link-button" onClick={() => addMarker('assignment')}>{tr('作业')}</button></span></div> } : null,
+    sessionLive && savedThrough ? { id: 'checkpoint', node: <div className="session-saved" role="status"><span>{saveState === 'failed' ? tr('保存失败') : tr('已保存到 {time}').replace('{time}', new Date(savedThrough).toLocaleTimeString())}{liveGaps.length > 0 ? ` · ${liveGaps.join(' · ')}` : ''}</span><span className="list-item-actions"><button type="button" className="link-button" onClick={() => addMarker('important')}>{tr('重点')}</button><button type="button" className="link-button" onClick={() => addMarker('unclear')}>{tr('没听懂')}</button><button type="button" className="link-button" onClick={() => addMarker('assignment')}>{tr('作业')}</button></span></div> } : null,
     sessionLive ? { id: 'marks', node: <div className="session-saved" role="group" aria-label={tr('课堂标记')}><button type="button" className="link-button" onClick={() => addMarker('important')}>{tr('重点')}</button><button type="button" className="link-button" onClick={() => addMarker('unclear')}>{tr('没听懂')}</button><button type="button" className="link-button" onClick={() => addMarker('assignment')}>{tr('作业')}</button></div> } : null,
-    sessionStatus === 'idle' && authenticated ? { id: 'courses', node: <CourseBar disabled={busySession} languageA={languageA} languageB={languageB} onStart={(course) => void start(course)} /> } : null,
+    sessionStatus === 'idle' && authenticated ? { id: 'courses', node: <CourseBar disabled={busySession} languageA={languageA} languageB={languageB} recordAudio={recordAudio} glossaryId={glossaryId} onStart={(course) => void start(course)} /> } : null,
     !recordAck && recordAudio && sessionStatus === 'idle' ? { id: 'record-ack', node: <div className="record-notice" role="status"><p>{tr('录音默认开启。本次语音会保存到你的字幕库，只有你可以回放和删除。如果不需要保存，请先关闭「保存本次语音」。')}</p><button type="button" className="secondary-button" onClick={() => { localStorage.setItem('linguaflow_record_ack', '1'); setRecordAck(true); }}>{tr('知道了')}</button></div> } : null,
     showGuide && sessionStatus === 'idle' && !conflictSession && !routeEnded ? { id: 'guide', node: <FirstRun pair={currentLabel} plan={entitlement?.plan.toUpperCase() ?? 'FREE'} minutesLeft={entitlement ? (usableSeconds(entitlement) >= Number.MAX_SAFE_INTEGER / 2 ? tr('无限') : `${Math.ceil(usableSeconds(entitlement) / 60)} ${tr('分钟')}`) : '…'} onOpen={() => { if (!phone) setDockOpen(true); }} onDone={() => setShowGuide(false)} /> } : null,
     liveNotice ? { id: 'live-notice', node: <p className="live-notice" role="status">{liveNotice}</p> } : null

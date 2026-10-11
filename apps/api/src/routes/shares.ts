@@ -59,6 +59,8 @@ export async function shareRoutes(app: FastifyInstance) {
       durationMs: transcript.durationMs,
       expiresAt: share.expiresAt,
       summaryMarkdown: transcript.summaryMarkdown,
+      summaryCitationHashes: transcript.summaryCitationHashes,
+      gaps: transcript.gaps,
       scope: share.scope,
       viewCount: share.viewCount + 1,
       includeAudio: share.includeAudio && !summaryOnly,
@@ -71,19 +73,27 @@ export async function shareRoutes(app: FastifyInstance) {
   app.get('/v1/shares/:token/export', async (request, reply) => {
     const share = await readShare(request, reply);
     if (!share) return reply.sent ? reply : reply.code(404).send({ message: '分享链接已失效。' });
-    const query = z.object({ format: z.enum(['txt', 'srt', 'vtt', 'md', 'pdf']).default('txt'), scope: z.enum(['summary', 'full']).default('full') }).parse(request.query);
+    const query = z.object({ format: z.enum(['txt', 'srt', 'vtt', 'md', 'pdf']).default('txt'), scope: z.enum(['summary', 'full']).default('full'), tz: z.string().max(64).optional() }).parse(request.query);
     const [transcript] = await db.select().from(transcripts).where(eq(transcripts.id, share.transcriptId));
     if (!transcript || transcript.deletedAt) return reply.code(404).send({ message: '分享链接已失效。' });
     const summaryOnly = share.scope === 'summary' || query.scope === 'summary';
     if (share.scope === 'summary' && (query.format === 'srt' || query.format === 'vtt')) return reply.code(409).send({ message: '这份分享只有纪要。' });
     const segments = summaryOnly ? [] : await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcript.id)).orderBy(transcriptSegments.idx);
+    const { isIanaTimeZone } = await import('@linguaflow/shared');
     return sendTranscriptFile(reply, {
       title: transcript.title,
       createdAt: transcript.createdAt,
+      startedAt: transcript.startedAt,
+      endedAt: transcript.endedAt,
+      mode: transcript.mode,
+      timeZone: query.tz && isIanaTimeZone(query.tz) ? query.tz : null,
       durationMs: transcript.durationMs,
+      audioDurationMs: transcript.audioDurationMs,
       languageA: transcript.languageA,
       languageB: transcript.languageB,
       summaryMarkdown: transcript.summaryMarkdown,
+      gaps: Array.isArray(transcript.gaps) ? transcript.gaps : [],
+      recordStatus: transcript.recordStatus,
       segments
     }, query.format, summaryOnly ? 'summary' : query.scope);
   });

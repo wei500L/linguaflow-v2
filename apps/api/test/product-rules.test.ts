@@ -161,6 +161,33 @@ test('events drop caption text and repeated keys do not add a second success', (
   assert.equal(summarizeProductMetrics([], 0, 100).empty, true);
 });
 
+test('math inequalities survive markdown cleaning', () => {
+  const cleaned = sanitizeModelMarkdown('定义：$a < b$，另外 $c > d$。<script>alert(1)</script>', new Set());
+  assert.match(cleaned, /\$a < b\$/);
+  assert.match(cleaned, /\$c > d\$/);
+  assert.equal(cleaned.includes('script'), false);
+});
+
+test('after-class rate counts a session once', () => {
+  const metrics = summarizeProductMetrics([
+    { name: 'record_finished', createdAtMs: 1, userId: 'u', props: { sessionId: 's1' } },
+    { name: 'record_opened', createdAtMs: 2, userId: 'u', props: { sessionId: 's1' } },
+    { name: 'export_succeeded', createdAtMs: 3, userId: 'u', props: { sessionId: 's1' } },
+    { name: 'summary_succeeded', createdAtMs: 4, userId: 'u', props: { sessionId: 's1' } },
+    { name: 'audio_playback_started', createdAtMs: 5, userId: 'u', props: { sessionId: 's1' } }
+  ], 0, 10);
+  assert.equal(metrics.rates.afterClass.numerator, 1);
+  assert.equal(metrics.rates.afterClass.denominator, 1);
+});
+
+test('checkpoint failures count even before a session row is read', async () => {
+  const { applyCheckpointFailure } = await import('../src/realtime/persist.ts');
+  const first = applyCheckpointFailure({ count: 0, since: 0, savedThrough: null, seq: 0 }, 1_000, 10);
+  assert.equal(first.stopCapture, false);
+  const stopped = applyCheckpointFailure({ count: 2, since: 1_000, savedThrough: null, seq: 0 }, 2_000, 10);
+  assert.equal(stopped.stopCapture, true);
+});
+
 test('a killed process leaves a wav whose header matches the intact samples', async () => {
   const root = await mkdtemp(path.join(tmpdir(), 'linguaflow-wav-'));
   const user = '11111111-1111-4111-8111-111111111111';

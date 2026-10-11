@@ -1,14 +1,16 @@
 import { useEffect, useRef, useState } from 'react';
 import { PLANS } from '@linguaflow/shared';
+import { api } from './lib/api';
 import { tr } from './lib/i18n';
 
 export function FirstRun({ pair, plan, minutesLeft, onOpen, onDone }: { pair: string; plan: string; minutesLeft: string; onOpen: () => void; onDone: () => void }) {
   const [step, setStep] = useState(0);
   const [level, setLevel] = useState(0);
   const [probe, setProbe] = useState('');
+  const probeTicket = useRef(0);
   const stopProbe = useRef<(() => void) | null>(null);
-  useEffect(() => { onOpen(); }, []);
-  useEffect(() => () => stopProbe.current?.(), []);
+  useEffect(() => { onOpen(); void api('/v1/events', { method: 'POST', body: JSON.stringify({ name: 'onboarding_started', dedupeKey: 'onboarding_started' }) }).catch(() => undefined); }, []);
+  useEffect(() => () => { probeTicket.current += 1; stopProbe.current?.(); }, []);
   const freeMinutes = PLANS.free.monthlySeconds === null ? 0 : Math.round(PLANS.free.monthlySeconds / 60);
   const freeSession = Math.round(PLANS.free.maxSessionSeconds / 60);
   const steps = [
@@ -18,21 +20,29 @@ export function FirstRun({ pair, plan, minutesLeft, onOpen, onDone }: { pair: st
     tr('可以做一次收音测试。它只在这台设备上看音量，不会创建翻译会话，也不会扣额度。')
   ];
   function finish() {
+    probeTicket.current += 1;
     stopProbe.current?.();
     localStorage.setItem('linguaflow_seen_guide', '1');
+    void api('/v1/events', { method: 'POST', body: JSON.stringify({ name: 'onboarding_completed', dedupeKey: 'onboarding_completed' }) }).catch(() => undefined);
     onDone();
   }
   async function testMic() {
+    const ticket = ++probeTicket.current;
     stopProbe.current?.();
+    stopProbe.current = null;
     setProbe('');
+    let stream: MediaStream | null = null;
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (ticket !== probeTicket.current) { stream.getTracks().forEach((track) => track.stop()); return; }
       const context = new AudioContext();
+      if (ticket !== probeTicket.current) { stream.getTracks().forEach((track) => track.stop()); void context.close(); return; }
       const source = context.createMediaStreamSource(stream);
       const analyser = context.createAnalyser();
       source.connect(analyser);
       const data = new Uint8Array(analyser.fftSize);
       let frame = 0;
+      const owned = stream;
       const tick = () => {
         analyser.getByteTimeDomainData(data);
         let sum = 0;
@@ -43,8 +53,11 @@ export function FirstRun({ pair, plan, minutesLeft, onOpen, onDone }: { pair: st
         frame = requestAnimationFrame(tick);
       };
       frame = requestAnimationFrame(tick);
-      stopProbe.current = () => { cancelAnimationFrame(frame); stream.getTracks().forEach((track) => track.stop()); void context.close(); };
-    } catch { setProbe(tr('没有获得麦克风权限。测试已取消。')); }
+      stopProbe.current = () => { cancelAnimationFrame(frame); owned.getTracks().forEach((track) => track.stop()); void context.close(); };
+    } catch {
+      stream?.getTracks().forEach((track) => track.stop());
+      if (ticket === probeTicket.current) setProbe(tr('没有获得麦克风权限。测试已取消。'));
+    }
   }
   return <section className="guide-card" aria-label={tr('开始之前')}>
     <p className="eyebrow">{tr('第 {step} 步，共 4 步').replace('{step}', String(step + 1))}</p>

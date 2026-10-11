@@ -160,27 +160,28 @@ export async function quoteSummary(userId: string, transcriptId: string, templat
 
 export async function startSummary(userId: string, transcriptId: string, template: SummaryTemplate, outputLanguage: string, provider: 'platform' | 'byok' = 'byok', device?: DeviceRef | null, confirmation?: { idempotencyKey: string; inputHash: string; inputVersion: number; quoteSeconds: number; confirmOverwrite?: boolean }) {
   if (!confirmation?.idempotencyKey) throw httpError(400, '请确认后再生成笔记。');
+  const [transcript] = await db.select().from(transcripts).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
+  if (!transcript) throw httpError(404, 'Transcript not found');
+  if (transcript.recordStatus === 'active') throw httpError(409, '这场记录还在进行，结束后再生成笔记。');
+  if (transcript.summaryEditedAt && !confirmation.confirmOverwrite) throw httpError(409, '笔记已手动修改。确认后才会用新的生成结果替换它。', 'confirm_overwrite');
+  const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId)).orderBy(transcriptSegments.idx);
+  const entries = toEntries(segments);
+  if (!entries.length) throw httpError(400, '这条记录没有可总结的文本。');
+  const hash = summaryInputHash(segments);
+  if (hash !== confirmation.inputHash || transcript.summaryInputVersion !== confirmation.inputVersion) throw httpError(409, '字幕已经变化，请重新确认费用。', 'quote_stale');
+  const entitlement = await ensureEntitlement(userId);
+  const expected = provider === 'platform' ? platformSummarySeconds(entries.reduce((sum, entry) => sum + entry.original.length + entry.translation.length, 0), entitlement.plan as Plan) : 0;
+  if (expected !== confirmation.quoteSeconds) throw httpError(409, '费用已经变化，请重新确认。', 'quote_stale');
+  const [existingRequest] = await db.select().from(summaryRequests).where(and(eq(summaryRequests.userId, userId), eq(summaryRequests.idempotencyKey, confirmation.idempotencyKey)));
+  if (existingRequest) {
+    if (existingRequest.transcriptId !== transcriptId || existingRequest.inputHash !== hash || existingRequest.provider !== provider || existingRequest.quoteSeconds !== expected || existingRequest.template !== template) throw httpError(409, '这次确认对应的内容和费用不一致。', 'quote_stale');
+    return { status: existingRequest.status, duplicate: true as const };
+  }
   if (inflight.has(userId)) throw httpError(409, '已有一份纪要正在生成。');
   const controller = new AbortController();
   inflight.set(userId, { transcriptId, controller });
+  let reserved = false;
   try {
-    const [transcript] = await db.select().from(transcripts).where(and(eq(transcripts.id, transcriptId), eq(transcripts.userId, userId), isNull(transcripts.deletedAt)));
-    if (!transcript) throw httpError(404, 'Transcript not found');
-    if (transcript.recordStatus === 'active') throw httpError(409, '这场记录还在进行，结束后再生成笔记。');
-    if (transcript.summaryEditedAt && !confirmation.confirmOverwrite) throw httpError(409, '笔记已手动修改。确认后才会用新的生成结果替换它。', 'confirm_overwrite');
-    const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, transcriptId)).orderBy(transcriptSegments.idx);
-    const entries = toEntries(segments);
-    if (!entries.length) throw httpError(400, '这条记录没有可总结的文本。');
-    const hash = summaryInputHash(segments);
-    if (hash !== confirmation.inputHash || transcript.summaryInputVersion !== confirmation.inputVersion) throw httpError(409, '字幕已经变化，请重新确认费用。', 'quote_stale');
-    const entitlement = await ensureEntitlement(userId);
-    const expected = provider === 'platform' ? platformSummarySeconds(entries.reduce((sum, entry) => sum + entry.original.length + entry.translation.length, 0), entitlement.plan as Plan) : 0;
-    if (expected !== confirmation.quoteSeconds) throw httpError(409, '费用已经变化，请重新确认。', 'quote_stale');
-    const [existingRequest] = await db.select().from(summaryRequests).where(and(eq(summaryRequests.userId, userId), eq(summaryRequests.idempotencyKey, confirmation.idempotencyKey)));
-    if (existingRequest) {
-      if (existingRequest.inputHash !== hash || existingRequest.provider !== provider || existingRequest.quoteSeconds !== expected) throw httpError(409, '这次确认对应的内容和费用不一致。', 'quote_stale');
-      return { status: existingRequest.status, duplicate: true as const };
-    }
     let apiBase = '';
     let apiKey: string | undefined;
     let model = '';
@@ -217,12 +218,14 @@ export async function startSummary(userId: string, transcriptId: string, templat
     } catch (error) {
       const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
       if (code !== '23505') throw error;
+      if (inflight.get(userId)?.controller === controller) inflight.delete(userId);
       const [raced] = await db.select().from(summaryRequests).where(and(eq(summaryRequests.userId, userId), eq(summaryRequests.idempotencyKey, confirmation.idempotencyKey)));
       return { status: raced?.status ?? 'running', duplicate: true as const };
     }
     if (provider === 'platform') {
       if (entitlement.plan === 'free') await assertFreeTranslation(userId, seen);
       await reserveQuotedSummary(userId, transcriptId, expected, seen);
+      reserved = true;
     }
     await snapshotNote(userId, transcript);
     await db.transaction(async (tx) => {
@@ -237,7 +240,8 @@ export async function startSummary(userId: string, transcriptId: string, templat
     });
     return { status: 'running' as const, duplicate: false as const };
   } catch (error) {
-    await refundSummaryUsage(userId, transcriptId);
+    if (reserved) await refundSummaryUsage(userId, transcriptId);
+    await db.update(summaryRequests).set({ status: 'failed' }).where(and(eq(summaryRequests.userId, userId), eq(summaryRequests.idempotencyKey, confirmation.idempotencyKey), eq(summaryRequests.status, 'running'))).catch(() => undefined);
     if (inflight.get(userId)?.controller === controller) inflight.delete(userId);
     throw error;
   }

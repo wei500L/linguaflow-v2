@@ -6,7 +6,7 @@ import { glossaries, glossaryTerms, realtimeSessions } from '../db/schema.js';
 import { config } from '../config.js';
 import { acceptPcmFrame, PCM_BYTES_PER_SECOND, type AudioGap, type TranscriptToken } from '@linguaflow/shared';
 import { recordingRelative } from '../lib/recordings.js';
-import { attachRecording, finalizePersistedSession, instanceId, persistCheckpoint, rememberGap, rememberMarker } from './persist.js';
+import { attachRecording, type CheckpointResult, finalizePersistedSession, instanceId, persistCheckpoint, rememberGap, rememberMarker } from './persist.js';
 import { SessionRecorder } from './recorder.js';
 import { buildSonioxConfig, type GlossaryMeta, type GlossaryTermInput } from './soniox.js';
 import { recordEvent } from '../lib/events.js';
@@ -218,6 +218,10 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     }
     return drainPromise;
   };
+  const reportSave = (result: CheckpointResult) => {
+    sendJson(hostSocket(), { type: 'save_status', status: result.ok ? 'saved' : 'failed', savedThrough: result.savedThrough, checkpointSeq: result.checkpointSeq });
+    if (!result.ok && result.stopCapture) void requestDrain('save_failed');
+  };
   const flushCheckpoint = (force = false) => persistCheckpoint({
     sessionId: session.id,
     finalTokens,
@@ -276,10 +280,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
     startedAt = new Date();
     await db.update(realtimeSessions).set({ startedAt, status: 'active', ownerInstanceId: instanceId, ownerHeartbeatAt: startedAt, activeUntil: startedAt }).where(and(eq(realtimeSessions.id, session.id), eq(realtimeSessions.status, 'connecting')));
     await recordEvent({ userId: session.userId, name: 'session_ready', dedupeKey: `session_ready:${session.id}`, props: { sessionId: session.id, mode: session.mode } });
-    checkpointTimer = setInterval(() => { void flushCheckpoint(true).then((result) => {
-      sendJson(hostSocket(), { type: 'save_status', status: result.ok ? 'saved' : 'failed', savedThrough: result.savedThrough, checkpointSeq: result.checkpointSeq });
-      if (!result.ok && result.stopCapture) void requestDrain('save_failed');
-    }).catch(() => undefined); }, 4_000);
+    checkpointTimer = setInterval(() => { void flushCheckpoint(true).then(reportSave).catch((error) => reportSave({ ok: false, savedThrough: null, checkpointSeq: 0, stopCapture: true, error: error instanceof Error ? error.message : 'checkpoint failed' })); }, 4_000);
     checkpointTimer.unref();
     if (ended || upstream.readyState !== upstream.OPEN) return;
     upstream.send(JSON.stringify(buildSonioxConfig(session, loadedGlossary.terms, loadedGlossary.glossary)));
@@ -318,11 +319,7 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
         if (token.text === '<end>' || token.is_final) { finalTokens.push(token); sawFinal = true; }
       }
       if (sawFinal) {
-        void flushCheckpoint(false).then((result) => {
-          if (!result.savedThrough && result.ok) return;
-          sendJson(hostSocket(), { type: 'save_status', status: result.ok ? 'saved' : 'failed', savedThrough: result.savedThrough, checkpointSeq: result.checkpointSeq });
-          if (!result.ok && result.stopCapture) void requestDrain('save_failed');
-        }).catch(() => undefined);
+        void flushCheckpoint(false).then(reportSave).catch((error) => reportSave({ ok: false, savedThrough: null, checkpointSeq: 0, stopCapture: true, error: error instanceof Error ? error.message : 'checkpoint failed' }));
       }
       const tokens = event.tokens ?? [];
       sendJson(hostSocket(), { type: 'transcript', tokens, ...(totalAudioProcMs !== undefined ? { totalAudioProcMs } : {}) });
@@ -365,12 +362,17 @@ export async function handleRealtimeSocket(client: WebSocket, token: string) {
           }
           if (event.type === 'gap') {
             const gap = cleanGap(event);
-            if (gap && !gaps.some((item) => item.id === gap.id)) { gaps.push(gap); void rememberGap(session.id, gap).catch(() => undefined); }
+            if (!gap) return;
+            if (!gaps.some((item) => item.id === gap.id)) gaps.push(gap);
+            void rememberGap(session.id, gap).then((ok) => sendJson(socket, { type: 'gap_ack', id: gap.id, ok })).catch(() => sendJson(socket, { type: 'gap_ack', id: gap.id, ok: false }));
             return;
           }
           if (event.type === 'marker') {
             const marker = cleanMarker(event);
-            if (marker) void rememberMarker({ ...marker, userId: session.userId, sessionId: session.id }).catch(() => undefined);
+            if (!marker) return;
+            void rememberMarker({ ...marker, userId: session.userId, sessionId: session.id }).then((ok) => {
+              sendJson(socket, { type: 'marker_ack', id: marker.id, ok });
+            }).catch(() => sendJson(socket, { type: 'marker_ack', id: marker.id, ok: false }));
             return;
           }
           if (stopRequested || upstream.readyState !== upstream.OPEN) return;

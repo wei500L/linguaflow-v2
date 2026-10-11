@@ -4,7 +4,7 @@ import { api } from './lib/api';
 import { tr } from './lib/i18n';
 import { CloseIcon, QrIcon } from './icons';
 
-type Audience = { token: string | null; includeAudio: boolean; expiresAt: string | null };
+type Audience = { token: string | null; includeAudio: boolean; keepAfter?: boolean; expiresAt: string | null };
 type SessionMode = 'one_way' | 'two_way';
 
 const classStarted = new Set<string>();
@@ -96,7 +96,10 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
       });
       if (result.audience?.token && syncedToken.current !== result.audience.token) {
         syncedToken.current = result.audience.token;
+      }
+      if (result.audience) {
         setIncludeAudio(result.audience.includeAudio);
+        setKeepAfter(Boolean(result.audience.keepAfter));
       }
       if (!result.audience) syncedToken.current = '';
       if (bootstrapped.current === sessionId) return;

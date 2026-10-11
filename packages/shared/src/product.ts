@@ -237,11 +237,22 @@ export function citationState(segmentId: string, snapshotHash: string | undefine
 
 const SEGMENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
+function shieldMathAndCode(markdown: string) {
+  const slots: string[] = [];
+  const shielded = markdown.replace(/```[\s\S]*?```|\$\$[\s\S]*?\$\$|\$[^$\n]*\$/g, (match) => {
+    const token = `\u0000${slots.length}\u0000`;
+    slots.push(match);
+    return token;
+  });
+  return { shielded, slots };
+}
+
 export function sanitizeModelMarkdown(markdown: string, validIds: ReadonlySet<string>, hashes?: Record<string, string>, current?: Record<string, string>, annotateChanged = true) {
-  const withoutTags = markdown
+  const { shielded, slots } = shieldMathAndCode(markdown);
+  const withoutTags = shielded
     .replace(/<script[\s\S]*?>[\s\S]*?<\/script>/gi, '')
     .replace(/<style[\s\S]*?>[\s\S]*?<\/style>/gi, '')
-    .replace(/<[^>]+>/g, '');
+    .replace(/<\/?[a-z][^>\n]*>/gi, '');
   const noBadLinks = withoutTags.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (whole, label: string, href: string) => {
     const target = href.trim();
     if (/^https?:\/\//i.test(target)) return whole;
@@ -254,7 +265,7 @@ export function sanitizeModelMarkdown(markdown: string, validIds: ReadonlySet<st
     if (snapshot && current && current[clean] === undefined) return '「来源不可用」';
     if (annotateChanged && snapshot && current && current[clean] !== undefined && snapshot !== sourceHash(current[clean] ?? '')) return `[[seg:${clean}]]（来源已变化）`;
     return `[[seg:${clean}]]`;
-  });
+  }).replace(/\u0000(\d+)\u0000/g, (_whole, index: string) => slots[Number(index)] ?? '');
 }
 
 const SUPERSCRIPT: Record<string, string> = { '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹', '+': '⁺', '-': '⁻', '=': '⁼', '(': '⁽', ')': '⁾', n: 'ⁿ', i: 'ⁱ' };
@@ -423,7 +434,7 @@ export function reconnectExhausted(startedMs: number, nowMs: number) {
 export function acceptLiveEvent(input: { currentSocket: boolean; userStop: boolean; type: string }) {
   if (!input.currentSocket) return false;
   if (!input.userStop) return true;
-  return input.type === 'transcript' || input.type === 'finished' || input.type === 'error' || input.type === 'save_status' || input.type === 'snapshot';
+  return input.type === 'transcript' || input.type === 'finished' || input.type === 'error' || input.type === 'save_status' || input.type === 'snapshot' || input.type === 'marker_ack' || input.type === 'gap_ack';
 }
 
 export function sessionOutcome(input: { recordStatus: RecordLifecycle | null; saveState: SaveState; transcriptId: string | null }) {
@@ -477,9 +488,13 @@ export function percentile(values: number[], ratio: number) {
   return sorted[index] ?? null;
 }
 
-export type MetricEvent = { name: string; createdAtMs: number; props: EventProps };
+export type MetricEvent = { name: string; createdAtMs: number; userId?: string | null; props: EventProps };
 
-export function summarizeProductMetrics(events: MetricEvent[], fromMs: number, toMs: number) {
+function idsFor(rows: MetricEvent[], name: string) {
+  return new Set(rows.filter((event) => event.name === name && typeof event.props.sessionId === 'string').map((event) => String(event.props.sessionId)));
+}
+
+export function summarizeProductMetrics(events: MetricEvent[], fromMs: number, toMs: number, options?: { truncated?: boolean }) {
   const rows = events.filter((event) => event.createdAtMs >= fromMs && event.createdAtMs < toMs);
   const count = (name: string) => rows.filter((event) => event.name === name).length;
   const attempted = count('session_start_attempted');
@@ -527,19 +542,35 @@ export function summarizeProductMetrics(events: MetricEvent[], fromMs: number, t
       activation: count('activation_requested')
     },
     rates: {
-      firstCaption: { numerator: firstCaption, denominator: attempted, unknown: Math.max(0, attempted - ready) },
-      persisted: { numerator: persisted, denominator: finished + failed + recovered, unknown: 0 },
-      gaps: { numerator: gaps, denominator: finished + recovered, unknown: 0 },
-      afterClass: { numerator: opened + playback + exported + summarySucceeded, denominator: finished, unknown: 0 },
-      reused: { numerator: count('onboarding_completed'), denominator: count('onboarding_started'), unknown: 0 }
+      firstCaption: { numerator: idsFor(rows, 'session_first_caption').size, denominator: idsFor(rows, 'session_start_attempted').size, unknown: Math.max(0, attempted - ready), basis: 'sessions' },
+      persisted: { numerator: idsFor(rows, 'record_finished').size, denominator: idsFor(rows, 'record_finished').size + idsFor(rows, 'record_failed').size + idsFor(rows, 'record_recovered').size, unknown: 0, basis: 'sessions' },
+      gaps: { numerator: [...idsFor(rows, 'audio_gap')].filter((id) => idsFor(rows, 'record_finished').has(id) || idsFor(rows, 'record_recovered').has(id)).length, denominator: idsFor(rows, 'record_finished').size + idsFor(rows, 'record_recovered').size, unknown: 0, basis: 'sessions_with_a_gap', gapEvents: gaps },
+      afterClass: {
+        numerator: [...idsFor(rows, 'record_finished')].filter((id) => idsFor(rows, 'record_opened').has(id) || idsFor(rows, 'audio_playback_started').has(id) || idsFor(rows, 'export_succeeded').has(id) || idsFor(rows, 'summary_succeeded').has(id)).length,
+        denominator: idsFor(rows, 'record_finished').size,
+        unknown: 0,
+        basis: 'finished_sessions'
+      },
+      onboarding: { numerator: count('onboarding_completed'), denominator: count('onboarding_started'), unknown: 0, basis: 'guide' },
+      reused: (() => {
+        const byUser = new Map<string, number>();
+        for (const event of rows) {
+          if (event.name !== 'session_start_attempted' || !event.userId) continue;
+          byUser.set(event.userId, (byUser.get(event.userId) ?? 0) + 1);
+        }
+        const users = [...byUser.values()];
+        return { numerator: users.filter((value) => value >= 2).length, denominator: users.length, unknown: rows.filter((event) => event.name === 'session_start_attempted' && !event.userId).length, basis: 'users_with_another_session' };
+      })()
     },
     latency: {
+      basis: 'per_session_percentiles',
       samples: sampleCount,
       sessions: recognition.length,
       recognitionP50: percentile(recognition.map((event) => Number(event.props.recognitionP50)), 0.5),
       recognitionP95: percentile(recognition.map((event) => Number(event.props.recognitionP95 ?? event.props.recognitionP50)), 0.95),
       translationP50: percentile(translation.map((event) => Number(event.props.translationP50)), 0.5),
       translationP95: percentile(translation.map((event) => Number(event.props.translationP95 ?? event.props.translationP50)), 0.95)
-    }
+    },
+    truncated: Boolean(options?.truncated)
   };
 }

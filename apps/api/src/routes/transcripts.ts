@@ -201,7 +201,7 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const unlimited = PLANS[entitlement.plan as Plan].monthlySeconds === null;
     const hash = summarySourceHash(segments);
     const tasks = await db.select().from(transcriptTasks).where(eq(transcriptTasks.transcriptId, id)).orderBy(transcriptTasks.position);
-    await recordEvent({ userId, name: 'record_opened', dedupeKey: `record_opened:${id}:${userId}:${Math.floor(Date.now() / 60_000)}`, props: { transcriptId: id } });
+    await recordEvent({ userId, name: 'record_opened', dedupeKey: `record_opened:${id}:${userId}:${Math.floor(Date.now() / 60_000)}`, props: { transcriptId: id, sessionId: transcript.sessionId } });
     return {
       ...transcript,
       audioPlaybackToken: playable && transcript.audioRelPath ? signAudioPlayback(transcript.id, userId) : null,
@@ -218,6 +218,7 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const body = segmentBody.parse(request.body);
     const transcript = await ownedTranscript(userId, id);
     if (!transcript) return reply.code(404).send({ message: 'Transcript not found' });
+    if (transcript.recordStatus === 'active') return reply.code(409).send({ message: '这场记录还在进行，不能修订字幕。' });
     const [segment] = await db.update(transcriptSegments).set({ sourceText: body.sourceText, translationText: body.translationText, speaker: body.speaker ?? null }).where(and(eq(transcriptSegments.id, segmentId), eq(transcriptSegments.transcriptId, id))).returning();
     if (!segment) return reply.code(404).send({ message: '找不到这句字幕。' });
     const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, id));
@@ -231,6 +232,7 @@ export async function transcriptRoutes(app: FastifyInstance) {
     const body = speakerBody.parse(request.body);
     const transcript = await ownedTranscript(userId, id);
     if (!transcript) return reply.code(404).send({ message: 'Transcript not found' });
+    if (transcript.recordStatus === 'active') return reply.code(409).send({ message: '这场记录还在进行，不能修订字幕。' });
     const updated = await db.update(transcriptSegments).set({ speaker: body.to }).where(and(eq(transcriptSegments.transcriptId, id), eq(transcriptSegments.speaker, body.from))).returning({ id: transcriptSegments.id });
     const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, id));
     const refresh = await markSummaryStale(userId, id);
@@ -388,6 +390,7 @@ export async function transcriptRoutes(app: FastifyInstance) {
       return reply.code(206).type(type).send(createReadStream(full, { start, end }));
     }
     reply.header('content-length', info.size);
+    await recordEvent({ userId, name: 'audio_playback_started', dedupeKey: `audio_playback:${id}:${userId}`, props: { transcriptId: id, sessionId: transcript.sessionId } });
     return reply.type(type).send(createReadStream(full));
   });
 
@@ -399,7 +402,41 @@ export async function transcriptRoutes(app: FastifyInstance) {
     if (!transcript) return reply.code(404).send({ message: 'Transcript not found' });
     const segments = await db.select().from(transcriptSegments).where(eq(transcriptSegments.transcriptId, id)).orderBy(transcriptSegments.idx);
     const zone = query.tz && isIanaTimeZone(query.tz) ? query.tz : null;
-    await recordEvent({ userId, name: 'export_succeeded', dedupeKey: `export:${id}:${query.format}:${userId}:${Math.floor(Date.now() / 60_000)}`, props: { transcriptId: id } });
-    return sendTranscriptFile(reply, await meetingDocument(transcript, segments, zone), query.format, query.scope);
+    await sendTranscriptFile(reply, await meetingDocument(transcript, segments, zone), query.format, query.scope);
+    await recordEvent({ userId, name: 'export_succeeded', dedupeKey: `export:${id}:${query.format}:${userId}:${Math.floor(Date.now() / 60_000)}`, props: { transcriptId: id, sessionId: transcript.sessionId } });
+  });
+
+  app.get('/v1/transcripts/:id/markers', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const { id } = request.params as { id: string };
+    const transcript = await ownedTranscript(userId, id);
+    if (!transcript) return reply.code(404).send({ message: 'Transcript not found' });
+    const { sessionMarkers } = await import('../db/schema.js');
+    const { isNull: absent } = await import('drizzle-orm');
+    return db.select().from(sessionMarkers).where(and(eq(sessionMarkers.userId, userId), eq(sessionMarkers.transcriptId, id), absent(sessionMarkers.deletedAt))).orderBy(sessionMarkers.createdAt);
+  });
+
+  app.patch('/v1/transcripts/:id/markers/:markerId', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const { id, markerId } = request.params as { id: string; markerId: string };
+    if (!await ownedTranscript(userId, id)) return reply.code(404).send({ message: 'Transcript not found' });
+    const body = z.object({ note: z.string().max(500).nullable().optional(), kind: z.enum(['important', 'unclear', 'assignment']).optional() }).parse(request.body);
+    const { sessionMarkers } = await import('../db/schema.js');
+    const [updated] = await db.update(sessionMarkers).set({
+      ...(body.note !== undefined ? { note: body.note } : {}),
+      ...(body.kind ? { kind: body.kind } : {}),
+      updatedAt: new Date()
+    }).where(and(eq(sessionMarkers.id, markerId), eq(sessionMarkers.userId, userId), eq(sessionMarkers.transcriptId, id))).returning();
+    if (!updated) return reply.code(404).send({ message: '找不到这个标记。' });
+    return updated;
+  });
+
+  app.delete('/v1/transcripts/:id/markers/:markerId', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const { id, markerId } = request.params as { id: string; markerId: string };
+    const { sessionMarkers } = await import('../db/schema.js');
+    const [updated] = await db.update(sessionMarkers).set({ deletedAt: new Date() }).where(and(eq(sessionMarkers.id, markerId), eq(sessionMarkers.userId, userId), eq(sessionMarkers.transcriptId, id))).returning({ id: sessionMarkers.id });
+    if (!updated) return reply.code(404).send({ message: '找不到这个标记。' });
+    return reply.code(204).send();
   });
 }

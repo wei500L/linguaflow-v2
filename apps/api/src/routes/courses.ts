@@ -82,14 +82,17 @@ export async function courseRoutes(app: FastifyInstance) {
     const pattern = `%${query.q.replace(/[\\%_]/g, (char) => `\\${char}`)}%`;
     const { sql } = await import('drizzle-orm');
     const hits = await db.execute(sql`
-      select s.id as "segmentId", s.transcript_id as "transcriptId", t.title, s.source_text as "sourceText", s.translation_text as "translationText", s.start_ms as "startMs", s.idx,
-        lag(s.source_text) over (partition by s.transcript_id order by s.idx) as "before",
-        lead(s.source_text) over (partition by s.transcript_id order by s.idx) as "after"
-      from transcript_segments s
-      join transcripts t on t.id = s.transcript_id
-      where t.user_id = ${userId}::uuid and t.deleted_at is null and t.record_status <> 'active'
-        and (s.source_text ilike ${pattern} escape '\\' or s.translation_text ilike ${pattern} escape '\\')
-      order by t.created_at desc
+      with ordered as (
+        select s.id as "segmentId", s.transcript_id as "transcriptId", t.title, s.source_text as "sourceText", s.translation_text as "translationText", s.start_ms as "startMs", s.idx, t.created_at,
+          lag(s.source_text) over (partition by s.transcript_id order by s.idx) as "before",
+          lead(s.source_text) over (partition by s.transcript_id order by s.idx) as "after"
+        from transcript_segments s
+        join transcripts t on t.id = s.transcript_id
+        where t.user_id = ${userId}::uuid and t.deleted_at is null and t.record_status <> 'active'
+      )
+      select * from ordered
+      where "sourceText" ilike ${pattern} escape '\\' or "translationText" ilike ${pattern} escape '\\'
+      order by created_at desc
       limit ${query.limit}
     `);
     return { hits: hits };

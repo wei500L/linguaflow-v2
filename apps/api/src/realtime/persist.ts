@@ -38,6 +38,17 @@ export type FinishedAudio = {
 type CheckpointState = { count: number; since: number; savedThrough: string | null; seq: number };
 const checkpointState = new Map<string, CheckpointState>();
 const checkpointChain = new Map<string, Promise<unknown>>();
+const checkpointQueued = new Map<string, number>();
+
+export function applyCheckpointFailure(state: CheckpointState, now: number, unpersisted: number) {
+  const since = state.since || now;
+  const count = state.count + 1;
+  return {
+    count,
+    since,
+    stopCapture: checkpointFailureAction(count, now - since) === 'stop' || unpersisted > MAX_UNPERSISTED_TOKENS
+  };
+}
 
 export type CheckpointResult = {
   ok: boolean;
@@ -120,9 +131,20 @@ export function persistCheckpoint(input: {
   gaps: AudioGap[];
   startedAt: Date | null;
   force?: boolean;
+  summaryTemplate?: string | null;
 }): Promise<CheckpointResult> {
+  const waiting = checkpointQueued.get(input.sessionId) ?? 0;
+  if (waiting >= 2) {
+    const state = checkpointState.get(input.sessionId) ?? { count: 0, since: 0, savedThrough: null, seq: 0 };
+    const failure = applyCheckpointFailure(state, Date.now(), input.finalTokens.length);
+    checkpointState.set(input.sessionId, { ...state, count: failure.count, since: failure.since });
+    return Promise.resolve({ ok: false, savedThrough: state.savedThrough, checkpointSeq: state.seq, stopCapture: failure.stopCapture, error: 'checkpoint queue full' });
+  }
+  checkpointQueued.set(input.sessionId, waiting + 1);
   const previous = checkpointChain.get(input.sessionId) ?? Promise.resolve();
-  const run = previous.catch(() => undefined).then(() => writeCheckpoint(input));
+  const run = previous.catch(() => undefined).then(() => writeCheckpoint(input)).finally(() => {
+    checkpointQueued.set(input.sessionId, Math.max(0, (checkpointQueued.get(input.sessionId) ?? 1) - 1));
+  });
   checkpointChain.set(input.sessionId, run);
   return run;
 }
@@ -136,31 +158,36 @@ async function writeCheckpoint(input: {
   gaps: AudioGap[];
   startedAt: Date | null;
   force?: boolean;
+  summaryTemplate?: string | null;
 }): Promise<CheckpointResult> {
   const state = checkpointState.get(input.sessionId) ?? { count: 0, since: 0, savedThrough: null, seq: 0 };
   const now = Date.now();
   if (!input.force && state.savedThrough && now - Date.parse(state.savedThrough) < CHECKPOINT_GAP_MS) {
     return { ok: true, savedThrough: state.savedThrough, checkpointSeq: state.seq, stopCapture: false };
   }
-  const [session] = await db.select().from(realtimeSessions).where(eq(realtimeSessions.id, input.sessionId));
-  if (!session || session.endedAt) {
-    return { ok: true, savedThrough: session?.checkpointAt?.toISOString() ?? state.savedThrough, checkpointSeq: session?.checkpointSeq ?? state.seq, stopCapture: false };
-  }
-  const folded = foldCaptionTurns(input.finalTokens, [], false).filter((turn) => !turn.interim);
-  const activeUntil = new Date();
+  let persistedHint = 0;
   try {
+    const [session] = await db.select().from(realtimeSessions).where(eq(realtimeSessions.id, input.sessionId));
+    if (!session || session.endedAt || session.endReason === 'purged') {
+      return { ok: true, savedThrough: session?.checkpointAt?.toISOString() ?? state.savedThrough, checkpointSeq: session?.checkpointSeq ?? state.seq, stopCapture: false };
+    }
+    persistedHint = session.persistedTokenCount;
+    const folded = foldCaptionTurns(input.finalTokens, [], false).filter((turn) => !turn.interim);
+    const activeUntil = new Date();
     let transcriptId: string | null = null;
     let nextSeq = session.checkpointSeq + 1;
     await db.transaction(async (tx) => {
       const [locked] = await tx.select().from(realtimeSessions).where(eq(realtimeSessions.id, input.sessionId)).for('update');
-      if (!locked || locked.endedAt) return;
+      if (!locked || locked.endedAt || locked.endReason === 'purged') return;
+      const [draft] = await tx.select({ deletedAt: transcripts.deletedAt }).from(transcripts).where(eq(transcripts.sessionId, input.sessionId)).limit(1);
+      if (draft?.deletedAt) return;
       const persisted = locked.persistedTokenCount;
       const fresh = input.finalTokens.slice(Math.max(0, persisted));
       const merged = mergePersistedSegments(asSegments(locked.segmentSnapshot), folded, () => crypto.randomUUID());
       if (fresh.length) {
         await tx.insert(sessionTokenChunks).values({ sessionId: input.sessionId, seq: persisted, tokens: fresh }).onConflictDoNothing();
       }
-      if (merged.length) transcriptId = await upsertDraft(tx, locked, merged, input, activeUntil, 'active');
+      if (merged.length) transcriptId = await upsertDraft(tx, locked, merged, input, activeUntil, 'active', input.summaryTemplate ?? null);
       nextSeq = locked.checkpointSeq + 1;
       await tx.update(realtimeSessions).set({
         persistedTokenCount: persisted + fresh.length,
@@ -187,21 +214,18 @@ async function writeCheckpoint(input: {
     }
     return { ok: true, savedThrough, checkpointSeq: nextSeq, stopCapture: false };
   } catch (error) {
-    const since = state.since || now;
-    const count = state.count + 1;
-    checkpointState.set(input.sessionId, { count, since, savedThrough: state.savedThrough, seq: state.seq });
+    const failure = applyCheckpointFailure(state, now, Math.max(0, input.finalTokens.length - persistedHint));
+    checkpointState.set(input.sessionId, { count: failure.count, since: failure.since, savedThrough: state.savedThrough, seq: state.seq });
     const message = error instanceof Error ? error.message : 'checkpoint failed';
     await db.update(realtimeSessions).set({ saveStatus: 'failed', saveError: message.slice(0, 300) }).where(and(eq(realtimeSessions.id, input.sessionId), isNull(realtimeSessions.endedAt))).catch(() => undefined);
-    const unpersisted = Math.max(0, input.finalTokens.length - session.persistedTokenCount);
-    const stopCapture = checkpointFailureAction(count, now - since) === 'stop' || unpersisted > MAX_UNPERSISTED_TOKENS;
-    return { ok: false, savedThrough: state.savedThrough, checkpointSeq: state.seq, stopCapture, error: message };
+    return { ok: false, savedThrough: state.savedThrough, checkpointSeq: state.seq, stopCapture: failure.stopCapture, error: message };
   }
 }
 
 type SessionRow = typeof realtimeSessions.$inferSelect;
 type TokenExecutor = Pick<typeof db, 'insert' | 'select' | 'update' | 'delete'>;
 
-async function upsertDraft(tx: TokenExecutor, session: SessionRow, merged: PersistedSegment[], input: { title: string; gaps: AudioGap[]; audioMs: number; speakerNames: Record<string, string> }, activeUntil: Date, recordStatus: 'active' | 'incomplete' | 'complete', audio?: FinishedAudio) {
+async function upsertDraft(tx: TokenExecutor, session: SessionRow, merged: PersistedSegment[], input: { title: string; gaps: AudioGap[]; audioMs: number; speakerNames: Record<string, string> }, activeUntil: Date, recordStatus: 'active' | 'incomplete' | 'complete', summaryTemplate: string | null, audio?: FinishedAudio) {
   const [existing] = await tx.select().from(transcripts).where(eq(transcripts.sessionId, session.id)).limit(1);
   if (existing?.deletedAt) return existing.id;
   const startedAt = session.startedAt;
@@ -210,7 +234,7 @@ async function upsertDraft(tx: TokenExecutor, session: SessionRow, merged: Persi
   const gaps = input.gaps.length ? input.gaps : asGaps(session.gaps);
   let transcriptId = existing?.id ?? null;
   if (!existing) {
-    const template = await templateFor(session.mode, session.courseId);
+    const template = summaryTemplate ?? await templateFor(session.mode, session.courseId);
     const [created] = await tx.insert(transcripts).values({
       userId: session.userId,
       sessionId: session.id,
@@ -268,11 +292,28 @@ async function upsertDraft(tx: TokenExecutor, session: SessionRow, merged: Persi
 }
 
 export async function finalizePersistedSession(sessionId: string, reason: string, options: { interrupted?: boolean; audio?: FinishedAudio; title?: string; gaps?: AudioGap[]; speakerNames?: Record<string, string> } = {}) {
+  let audio = options.audio;
+  let interrupted = options.interrupted ?? false;
+  let template: string | null = null;
+  const [preview] = await db.select({ recordingRelPath: realtimeSessions.recordingRelPath, endedAt: realtimeSessions.endedAt, mode: realtimeSessions.mode, courseId: realtimeSessions.courseId }).from(realtimeSessions).where(eq(realtimeSessions.id, sessionId));
+  if (preview) template = await templateFor(preview.mode, preview.courseId);
+  if (!audio && preview && !preview.endedAt && preview.recordingRelPath) {
+    markLiveRecording(preview.recordingRelPath);
+    try {
+      const repaired = await repairWavFile(preview.recordingRelPath);
+      if (repaired && repaired.pcmBytes >= 2) {
+        audio = { relPath: preview.recordingRelPath, status: 'encoding', format: 'wav', bytes: repaired.bytes, durationMs: repaired.durationMs, error: null };
+        interrupted = options.interrupted ?? true;
+      }
+    } finally {
+      unmarkLiveRecording(preview.recordingRelPath);
+    }
+  }
   const prepared = await db.transaction(async (tx) => {
     const [session] = await tx.select().from(realtimeSessions).where(eq(realtimeSessions.id, sessionId)).for('update');
     if (!session) return { missing: true as const };
     const [existing] = await tx.select().from(transcripts).where(eq(transcripts.sessionId, sessionId)).limit(1);
-    if (session.endedAt) {
+    if (session.endedAt || session.endReason === 'purged') {
       return { duplicate: true as const, userId: session.userId, transcriptId: existing?.deletedAt ? null : existing?.id ?? null, recordStatus: existing?.recordStatus ?? null, saveStatus: session.saveStatus };
     }
     const chunks = await tx.select().from(sessionTokenChunks).where(eq(sessionTokenChunks.sessionId, sessionId)).orderBy(asc(sessionTokenChunks.seq));
@@ -284,13 +325,12 @@ export async function finalizePersistedSession(sessionId: string, reason: string
     const seconds = billableSecondsFromCheckpoint({
       startedAtMs: session.startedAt?.getTime() ?? null,
       activeUntilMs: session.activeUntil?.getTime() ?? session.checkpointAt?.getTime() ?? null,
-      audioMs: Math.max(session.audioMs, options.audio?.durationMs ?? 0),
+      audioMs: Math.max(session.audioMs, audio?.durationMs ?? 0),
       maxSessionSeconds: session.maxSessionSeconds,
       reservedSeconds: session.reservedSeconds
     });
     const failed = session.saveStatus === 'failed';
-    const recordStatus = options.interrupted || failed ? 'incomplete' : 'complete';
-    const audio = options.audio;
+    const recordStatus = interrupted || failed ? 'incomplete' : 'complete';
     const hasBody = merged.length > 0 || Boolean(audio?.relPath || session.recordingRelPath);
     let transcriptId: string | null = existing?.deletedAt ? existing.id : null;
     if (hasBody && !existing?.deletedAt) {
@@ -299,7 +339,10 @@ export async function finalizePersistedSession(sessionId: string, reason: string
         gaps: options.gaps ?? asGaps(session.gaps),
         audioMs: session.audioMs,
         speakerNames: names
-      }, activeUntil, recordStatus, audio);
+      }, activeUntil, recordStatus, template, audio);
+    }
+    if (existing?.deletedAt) {
+      return { missing: false as const, duplicate: false as const, userId: session.userId, transcriptId: null, seconds, reason, recordStatus: 'incomplete' as const, failed: true, keepAfter: false, hasBody: false };
     }
     await tx.update(realtimeSessions).set({ segmentSnapshot: merged, gaps: options.gaps ?? asGaps(session.gaps) }).where(eq(realtimeSessions.id, sessionId));
     return { missing: false as const, duplicate: false as const, userId: session.userId, transcriptId, seconds, reason, recordStatus, failed, keepAfter: session.audienceKeepAfter && session.shareIntent === 'audience', hasBody };
@@ -308,7 +351,7 @@ export async function finalizePersistedSession(sessionId: string, reason: string
   if (prepared.duplicate) {
     return { transcriptId: prepared.transcriptId, outcome: sessionOutcome({ recordStatus: prepared.recordStatus as 'active' | 'incomplete' | 'complete' | null, saveState: prepared.saveStatus === 'failed' ? 'failed' : 'saved', transcriptId: prepared.transcriptId }), duplicate: true };
   }
-  await settleUsage(prepared.userId, sessionId, prepared.seconds, options.interrupted ? 'interrupted' : reason);
+  await settleUsage(prepared.userId, sessionId, prepared.seconds, interrupted ? 'interrupted' : reason);
   if (prepared.transcriptId && prepared.recordStatus === 'complete' && prepared.keepAfter && !prepared.failed) {
     const [fresh] = await db.select().from(realtimeSessions).where(eq(realtimeSessions.id, sessionId));
     if (fresh) await ensureAudienceShare(fresh, prepared.transcriptId).catch(() => null);
@@ -318,9 +361,9 @@ export async function finalizePersistedSession(sessionId: string, reason: string
     saveState: prepared.failed ? 'failed' : 'saved',
     transcriptId: prepared.hasBody ? prepared.transcriptId : null
   });
-  const event = options.interrupted ? 'record_recovered' : outcome === 'failed' ? 'record_failed' : 'record_finished';
+  const event = interrupted ? 'record_recovered' : outcome === 'failed' ? 'record_failed' : 'record_finished';
   await recordEvent({ userId: prepared.userId, name: event, dedupeKey: `${event}:${sessionId}`, props: { sessionId, reason, recordStatus: prepared.recordStatus, status: outcome } });
-  if (prepared.transcriptId && options.audio?.status === 'encoding') scheduleRecordingEncode(prepared.transcriptId);
+  if (prepared.transcriptId && audio?.status === 'encoding') scheduleRecordingEncode(prepared.transcriptId);
   checkpointState.delete(sessionId);
   return { transcriptId: prepared.hasBody ? prepared.transcriptId : null, outcome, duplicate: false, recordStatus: prepared.recordStatus };
 }
