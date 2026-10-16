@@ -82,7 +82,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
     if ('sent' in session) return session;
     const preview = body.glossaryId && glossaryMeta ? glossaryInjection(sessionInput(body, session.id), await db.select({ source: glossaryTerms.source, target: glossaryTerms.target, pinned: glossaryTerms.pinned }).from(glossaryTerms).where(eq(glossaryTerms.glossaryId, body.glossaryId)), glossaryMeta) : { used: 0, dropped: 0, droppedTerms: [] as string[] };
     await recordEvent({ userId, name: 'session_start_attempted', dedupeKey: `session_start_attempted:${session.id}`, props: { sessionId: session.id, mode: session.mode } });
-    return { sessionId: session.id, maxSessionSeconds: session.maxSessionSeconds, websocketUrl: socketUrl(request, '/v1/realtime/ws'), websocketProtocols: ['realtime.v1', sessionToken], glossaryTermsUsed: preview.used, glossaryTermsDropped: preview.dropped, shareIntent: session.shareIntent, courseWarning };
+    return { sessionId: session.id, title: session.title, maxSessionSeconds: session.maxSessionSeconds, websocketUrl: socketUrl(request, '/v1/realtime/ws'), websocketProtocols: ['realtime.v1', sessionToken], glossaryTermsUsed: preview.used, glossaryTermsDropped: preview.dropped, shareIntent: session.shareIntent, courseWarning };
   });
 
   app.get('/v1/realtime/sessions/active', { preHandler: app.authenticate }, async (request) => {

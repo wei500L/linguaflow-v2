@@ -85,7 +85,6 @@ export type ControlDockProps = {
   micId: string;
   recordAudio: boolean;
   voiceBoost: boolean;
-  sessionTitle: string;
   liveSessionId: string | null;
   captionView: CaptionView;
   captionSize: string;
@@ -106,7 +105,6 @@ export type ControlDockProps = {
   onMic: (value: string) => void;
   onRecordAudio: (value: boolean) => void;
   onVoiceBoost: (value: boolean) => void;
-  onSessionTitle: (value: string) => void;
   onCaptionView: (value: CaptionView) => void;
   onCaptionSize: (value: string) => void;
   onFullscreen: () => void;
@@ -121,7 +119,7 @@ export function ControlDock(props: ControlDockProps) {
   const {
     phone, sessionStatus, busySession, running, paused, closePrompt, dockOpen, captionOpen,
     mode, languages, languageA, languageB, sameLanguage, glossaryId, glossaryChoices, glossaryHint,
-    audioSource, mics, micId, recordAudio, voiceBoost, sessionTitle, liveSessionId,
+    audioSource, mics, micId, recordAudio, voiceBoost, liveSessionId,
     captionView, captionSize, fullscreen, directionLabel, remainingLabel, timeWarning, hasCaptions, planLabel, rejoin
   } = props;
 
@@ -129,7 +127,7 @@ export function ControlDock(props: ControlDockProps) {
     : sessionStatus === 'connecting' ? tr('连接中…')
     : sessionStatus === 'reconnecting' ? tr('正在恢复…')
     : sessionStatus === 'stopping' || sessionStatus === 'saving' ? tr('正在保存记录…')
-    : closePrompt ? tr('保存并结束')
+    : closePrompt ? tr('结束')
     : running ? tr('结束翻译')
     : rejoin ? tr('继续这场翻译')
     : tr('开始翻译');
@@ -200,10 +198,6 @@ export function ControlDock(props: ControlDockProps) {
     </Section>
 
     <Section title={tr('这场翻译')}>
-      <label className="audio-source session-title-field">
-        <span>{tr('这场翻译的名称')}</span>
-        <input value={sessionTitle} onChange={(event) => props.onSessionTitle(event.target.value.slice(0, 120))} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} disabled={sessionStatus === 'stopping'} />
-      </label>
       <div className="dock-sheet-actions">
         <span className={`direction-badge${timeWarning ? ' time-warning' : ''}`}>{directionLabel}{remainingLabel}</span>
       </div>

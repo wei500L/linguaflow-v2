@@ -98,14 +98,6 @@ function App() {
   useEffect(() => { localStorage.setItem('linguaflow_glossary', glossaryId); }, [glossaryId]);
   useEffect(() => { localStorage.setItem('linguaflow_caption_size', captionSize); }, [captionSize]);
   useEffect(() => { localStorage.setItem('linguaflow_caption_view', captionView); }, [captionView]);
-  useEffect(() => {
-    if (sessionStatus !== 'running' && sessionStatus !== 'reconnecting') return;
-    const handle = window.setTimeout(() => {
-      const title = sessionTitle.trim().slice(0, 120);
-      if (titleTouchedRef.current && socket.current?.readyState === WebSocket.OPEN) socket.current.send(JSON.stringify({ type: 'title', title }));
-    }, 400);
-    return () => window.clearTimeout(handle);
-  }, [sessionTitle, sessionStatus]);
   useEffect(() => { localStorage.setItem('linguaflow_mic', micId); }, [micId]);
   /* A phone that dims its screen also suspends the mic, so keep it awake while a
      session is live. The lock drops whenever the tab hides and is retaken on return. */
@@ -468,7 +460,7 @@ function App() {
     void listAudioInputs().then(setMics).catch(() => undefined);
     return true;
   }
-  async function start(course?: { id: string; mode: 'one_way' | 'two_way'; languageA: string; languageB: string; glossaryId?: string | null; recordAudio: boolean; title?: string | null }) {
+  async function start(course?: { id: string; mode: 'one_way' | 'two_way'; languageA: string; languageB: string; glossaryId?: string | null; recordAudio: boolean }) {
     if (statusRef.current !== 'idle') return;
     const nextMode = course?.mode ?? mode;
     const nextA = course?.languageA ?? languageA;
@@ -476,7 +468,7 @@ function App() {
     const nextRecord = course?.recordAudio ?? recordAudio;
     const nextGlossary = course ? (course.glossaryId ?? '') : glossaryId;
     if (nextA.toLowerCase().split('-')[0] === nextB.toLowerCase().split('-')[0]) { showProblem(tr('源语言和目标语言不能相同。')); return; }
-    if (course) { setMode(nextMode); setLanguageA(nextA); setLanguageB(nextB); setRecordAudio(nextRecord); setGlossaryId(nextGlossary); if (course.title) setSessionTitle(course.title); }
+    if (course) { setMode(nextMode); setLanguageA(nextA); setLanguageB(nextB); setRecordAudio(nextRecord); setGlossaryId(nextGlossary); }
     const id = ++generation.current;
     userStop.current = false;
     acceptAudio.current = false;
@@ -487,7 +479,7 @@ function App() {
     awaitingAck.current.clear();
     setUnsavedControls([]);
     void retryParked();
-    setSpeakerNames({}); setNamingSpeaker(null); setLiveNotice(''); setClosePrompt(false); closeTitleRef.current = sessionTitle.trim().slice(0, 120); titleTouchedRef.current = false;
+    setSpeakerNames({}); setNamingSpeaker(null); setLiveNotice(''); setClosePrompt(false); setSessionTitle(''); closeTitleRef.current = ''; titleTouchedRef.current = false;
     showProblem(''); setSavedNote(''); setSegments([]); setDockOpen(false); setShowJump(false); setEndedTranscriptId(null); setRemainingSeconds(null); setPaused(false); pausedRef.current = false; setConflictSession(null); followLatest.current = true; captionFold.current = createCaptionFold(); windowEndRef.current = 0; setWindowEnd(0); if (captionLimitRef.current !== CAPTION_PAGE) rememberCaptionLimit(CAPTION_PAGE); upstreamDone.current = false; audioQueue.current = []; latencyClock.current = createLatencyClock(); setLatency(NO_LATENCY); savedTranscriptId.current = null; limitSeconds.current = null; readyAt.current = null; wallOrigin.current = null; sentAudioMs.current = 0; pendingControls.current = []; awaitingAck.current.clear(); setUnsavedControls([]); setAckFailed(false); latencySamples.current = emptyLatencySamples(); setLiveGaps([]);
     updateSessionStatus('opening');
     try {
@@ -495,11 +487,11 @@ function App() {
       updateSessionStatus('connecting');
       startupTimer.current = window.setTimeout(() => { if (generation.current === id && (statusRef.current === 'connecting' || statusRef.current === 'opening')) { showProblem(tr('连接超时，请重试。')); void stop(); } }, 15_000);
       const glossary = nextGlossary ? { glossaryId: nextGlossary } : {};
-      const named = (course?.title || sessionTitle).trim().slice(0, 120);
-      const title = named ? { title: named } : {};
       const courseField = course ? { courseId: course.id } : {};
-      const session = await api<{ sessionId: string; websocketUrl: string; websocketProtocols: string[] }>('/v1/realtime/sessions', { method: 'POST', body: JSON.stringify(nextMode === 'one_way' ? { type: 'one_way', languageA: nextA, targetLanguage: nextB, recordAudio: nextRecord, shareIntent: 'personal', ...glossary, ...title, ...courseField } : { type: 'two_way', languageA: nextA, languageB: nextB, recordAudio: nextRecord, shareIntent: 'personal', ...glossary, ...title, ...courseField }) });
+      const session = await api<{ sessionId: string; title: string | null; websocketUrl: string; websocketProtocols: string[] }>('/v1/realtime/sessions', { method: 'POST', body: JSON.stringify(nextMode === 'one_way' ? { type: 'one_way', languageA: nextA, targetLanguage: nextB, recordAudio: nextRecord, shareIntent: 'personal', ...glossary, ...courseField } : { type: 'two_way', languageA: nextA, languageB: nextB, recordAudio: nextRecord, shareIntent: 'personal', ...glossary, ...courseField }) });
       if (generation.current !== id) { setLiveSessionId(null); void api(`/v1/realtime/sessions/${session.sessionId}`, { method: 'DELETE', headers: authToken.current ? { authorization: `Bearer ${authToken.current}` } : undefined }).catch(() => undefined); return; }
+      titleTouchedRef.current = false;
+      setSessionTitle(session.title ?? '');
       sessionId.current = session.sessionId;
       setLiveSessionId(session.sessionId);
       setRouteEnded(null);
@@ -619,7 +611,6 @@ function App() {
   }
   function requestClose() {
     if (statusRef.current !== 'running' && statusRef.current !== 'reconnecting') { void stop(); return; }
-    if (sessionTitle.trim()) { confirmClose(); return; }
     setClosePrompt(true);
   }
   function confirmClose() {
@@ -642,6 +633,7 @@ function App() {
     setLanguageA(session.languageA);
     const paired = session.mode === 'two_way' ? session.languageB : session.targetLanguage ?? session.languageB;
     if (paired) setLanguageB(paired);
+    titleTouchedRef.current = false;
     setSessionTitle(session.title ?? '');
   }
   async function resumeConflict() {
@@ -817,7 +809,7 @@ function App() {
 
   /* Highest priority first. SessionNotices renders only the first one. */
   const notices: Array<Notice | null> = [
-    closePrompt ? { id: 'close', node: <form className="close-title" onSubmit={(event) => { event.preventDefault(); confirmClose(); }}><label>{tr('这场翻译的名称')}<input value={sessionTitle} onChange={(event) => { titleTouchedRef.current = true; setSessionTitle(event.target.value); }} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} autoFocus /></label><button className="primary-button" type="submit">{tr('保存并结束')}</button><button type="button" className="link-button" onClick={() => setClosePrompt(false)}>{tr('继续翻译')}</button></form> } : null,
+    closePrompt ? { id: 'close', node: <form className="close-title" onSubmit={(event) => { event.preventDefault(); confirmClose(); }}><label>{tr('这场翻译的名称')}<input value={sessionTitle} onChange={(event) => { titleTouchedRef.current = true; setSessionTitle(event.target.value); }} maxLength={120} placeholder={tr('可选，方便以后查找')} aria-label={tr('这场翻译的名称')} autoFocus /></label><button className="primary-button" type="submit">{tr('结束')}</button><button type="button" className="link-button" onClick={() => setClosePrompt(false)}>{tr('继续翻译')}</button></form> } : null,
     namingSpeaker ? { id: 'speaker', node: <form className="speaker-rename-form" onSubmit={(event) => { event.preventDefault(); renameLiveSpeaker(); }}><label>{tr('改名为')}<input value={speakerDraft} onChange={(event) => setSpeakerDraft(event.target.value)} aria-label={tr('说话人名称')} autoFocus /></label><button className="secondary-button" type="submit">{tr('保存')}</button><button type="button" className="secondary-button" onClick={() => setNamingSpeaker(null)}>{tr('取消')}</button></form> } : null,
     error ? { id: 'error', node: <div className={`error-banner${recovery ? ' has-actions' : ''}`} role="alert"><span>{error}</span>{recovery && <><button type="button" className="primary-button" onClick={() => setPanel('pricing')}>{tr('打开套餐与激活码')}</button><button type="button" className="link-button" onClick={() => setPanel('invite')}>{tr('邀请朋友')}</button></>}</div> } : null,
     audioStalled && sessionLive ? { id: 'stalled', node: <div className="error-banner time-warning-banner" role="status">{tr('收音被系统暂停了，点一下屏幕继续。')}</div> } : null,
@@ -888,7 +880,6 @@ function App() {
         micId={micId}
         recordAudio={recordAudio}
         voiceBoost={voiceBoost}
-        sessionTitle={sessionTitle}
         liveSessionId={liveSessionId}
         captionView={captionView}
         captionSize={captionSize}
@@ -909,7 +900,6 @@ function App() {
         onMic={setMicId}
         onRecordAudio={setRecordAudio}
         onVoiceBoost={(value) => { voiceBoostOn.current = value; setVoiceBoost(value); }}
-        onSessionTitle={(value) => { titleTouchedRef.current = true; setSessionTitle(value); }}
         onCaptionView={setCaptionView}
         onCaptionSize={setCaptionSize}
         onFullscreen={() => void toggleFullscreen()}
