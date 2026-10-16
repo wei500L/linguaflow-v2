@@ -1,0 +1,15 @@
+empty database: linguaflow_empty_20261011
+ applied 
+---------
+      16
+(1 row)
+
+      column_name       
+------------------------
+ output_citation_hashes
+ output_language
+ output_markdown
+ output_model
+ output_saved_at
+(5 rows)
+

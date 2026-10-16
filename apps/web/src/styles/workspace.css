@@ -714,7 +714,6 @@
   font-size: var(--text-lg);
 }
 
-.session-title-field,
 .audio-source {
   display: grid;
   gap: 6px;

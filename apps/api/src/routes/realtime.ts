@@ -3,12 +3,14 @@ import type { FastifyInstance } from 'fastify';
 import { and, desc, eq, isNull } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index.js';
-import { entitlements, glossaries, glossaryTerms, realtimeSessions, transcripts } from '../db/schema.js';
+import { courses, entitlements, glossaries, glossaryTerms, realtimeSessions, transcripts } from '../db/schema.js';
 import { assertFreeTranslation, deviceDenied, recordUserDevice } from '../lib/device-store.js';
-import { holdFreeDevice, remainingSeconds, settleUsage } from '../lib/quota.js';
+import { recordEvent } from '../lib/events.js';
+import { holdFreeDevice, remainingSeconds } from '../lib/quota.js';
 import { PLANS } from '@linguaflow/shared';
 import { audienceReveal, newAudienceToken, revokeAudienceShare } from '../lib/audience.js';
-import { audienceCount, closeActiveSession, dropAudience, handleRealtimeSocket, holdSession } from '../realtime/proxy.js';
+import { audienceCount, closeActiveSession, dropAudience, handleRealtimeSocket, holdSession, noteRoomGap } from '../realtime/proxy.js';
+import { finalizePersistedSession, rememberGap, rememberMarker } from '../realtime/persist.js';
 import { glossaryInjection, sameLanguageResponse, type GlossaryMeta, type SonioxSessionInput } from '../realtime/soniox.js';
 import { socketUrl } from '../lib/socket-url.js';
 
@@ -20,15 +22,30 @@ function sessionInput(body: z.infer<typeof sessionBody>, id: string): SonioxSess
 }
 
 const titleField = z.string().trim().min(1).max(120).optional();
+const shareIntentField = z.enum(['personal', 'audience']).default('personal');
 const sessionBody = z.union([
-  z.object({ type: z.literal('one_way'), languageA: z.string().min(2), targetLanguage: z.string().min(2), glossaryId: z.string().uuid().optional(), recordAudio: z.boolean().optional(), title: titleField }),
-  z.object({ type: z.literal('two_way'), languageA: z.string().min(2), languageB: z.string().min(2), glossaryId: z.string().uuid().optional(), recordAudio: z.boolean().optional(), title: titleField })
+  z.object({ type: z.literal('one_way'), languageA: z.string().min(2), targetLanguage: z.string().min(2), glossaryId: z.string().uuid().optional(), recordAudio: z.boolean().optional(), title: titleField, shareIntent: shareIntentField, courseId: z.string().uuid().optional() }),
+  z.object({ type: z.literal('two_way'), languageA: z.string().min(2), languageB: z.string().min(2), glossaryId: z.string().uuid().optional(), recordAudio: z.boolean().optional(), title: titleField, shareIntent: shareIntentField, courseId: z.string().uuid().optional() })
 ]);
 
 export async function realtimeRoutes(app: FastifyInstance) {
   app.post('/v1/realtime/sessions', { preHandler: app.authenticate }, async (request, reply) => {
     const userId = (request.user as { sub: string }).sub;
-    const body = sessionBody.parse(request.body);
+    let body = sessionBody.parse(request.body);
+    let courseWarning: string | null = null;
+    if (body.courseId) {
+      const [course] = await db.select().from(courses).where(and(eq(courses.id, body.courseId), eq(courses.userId, userId)));
+      if (!course) return reply.code(404).send({ message: '找不到这门课。' });
+      let glossaryId = course.glossaryId ?? undefined;
+      if (glossaryId) {
+        const [glossary] = await db.select({ id: glossaries.id }).from(glossaries).where(and(eq(glossaries.id, glossaryId), eq(glossaries.userId, userId)));
+        if (!glossary) { glossaryId = undefined; courseWarning = 'glossary_missing'; }
+      }
+      const title = body.title ?? (course.titlePattern ? course.titlePattern.replaceAll('{date}', new Date().toLocaleDateString('zh-CN')).slice(0, 120) : undefined);
+      body = course.mode === 'two_way'
+        ? { type: 'two_way', languageA: course.languageA, languageB: course.languageB, glossaryId, recordAudio: course.recordAudio, title, shareIntent: body.shareIntent, courseId: course.id }
+        : { type: 'one_way', languageA: course.languageA, targetLanguage: course.languageB, glossaryId, recordAudio: course.recordAudio, title, shareIntent: body.shareIntent, courseId: course.id };
+    }
     const conflict = sameLanguageResponse(body);
     if (conflict) return reply.code(conflict.status).send({ code: conflict.code, message: conflict.message });
     let glossaryMeta: GlossaryMeta | null = null;
@@ -51,7 +68,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
       }
       const [active] = await tx.select().from(realtimeSessions).where(and(eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt))).for('update');
       if (active) throw Object.assign(new Error('session_conflict'), { statusCode: 409, code: 'session_conflict', sessionId: active.id });
-      const [created] = await tx.insert(realtimeSessions).values({ userId, sessionTokenHash: crypto.createHash('sha256').update(sessionToken).digest('hex'), mode: body.type, languageA: body.languageA, languageB: body.type === 'two_way' ? body.languageB : null, targetLanguage: body.type === 'one_way' ? body.targetLanguage : null, glossaryId: body.glossaryId, maxSessionSeconds: maxSeconds, reservedSeconds: Math.min(maxSeconds, available), recordAudio: body.recordAudio ?? true, title: body.title ?? null, fingerprintHash: device?.fingerprintHash ?? null, deviceId: device?.deviceId ?? null }).returning();
+      const [created] = await tx.insert(realtimeSessions).values({ userId, sessionTokenHash: crypto.createHash('sha256').update(sessionToken).digest('hex'), mode: body.type, languageA: body.languageA, languageB: body.type === 'two_way' ? body.languageB : null, targetLanguage: body.type === 'one_way' ? body.targetLanguage : null, glossaryId: body.glossaryId, maxSessionSeconds: maxSeconds, reservedSeconds: Math.min(maxSeconds, available), recordAudio: body.recordAudio ?? true, title: body.title ?? null, fingerprintHash: device?.fingerprintHash ?? null, deviceId: device?.deviceId ?? null, shareIntent: body.shareIntent, courseId: body.courseId ?? null }).returning();
       return created;
     }).catch(async (error: any) => {
       if (error?.code === 'quota_exhausted') return reply.code(402).send({ code: 'quota_exhausted', message: quotaExhaustedMessage });
@@ -64,7 +81,8 @@ export async function realtimeRoutes(app: FastifyInstance) {
     });
     if ('sent' in session) return session;
     const preview = body.glossaryId && glossaryMeta ? glossaryInjection(sessionInput(body, session.id), await db.select({ source: glossaryTerms.source, target: glossaryTerms.target, pinned: glossaryTerms.pinned }).from(glossaryTerms).where(eq(glossaryTerms.glossaryId, body.glossaryId)), glossaryMeta) : { used: 0, dropped: 0, droppedTerms: [] as string[] };
-    return { sessionId: session.id, maxSessionSeconds: session.maxSessionSeconds, websocketUrl: socketUrl(request, '/v1/realtime/ws'), websocketProtocols: ['realtime.v1', sessionToken], glossaryTermsUsed: preview.used, glossaryTermsDropped: preview.dropped };
+    await recordEvent({ userId, name: 'session_start_attempted', dedupeKey: `session_start_attempted:${session.id}`, props: { sessionId: session.id, mode: session.mode } });
+    return { sessionId: session.id, title: session.title, maxSessionSeconds: session.maxSessionSeconds, websocketUrl: socketUrl(request, '/v1/realtime/ws'), websocketProtocols: ['realtime.v1', sessionToken], glossaryTermsUsed: preview.used, glossaryTermsDropped: preview.dropped, shareIntent: session.shareIntent, courseWarning };
   });
 
   app.get('/v1/realtime/sessions/active', { preHandler: app.authenticate }, async (request) => {
@@ -86,7 +104,11 @@ export async function realtimeRoutes(app: FastifyInstance) {
       languageB: realtimeSessions.languageB,
       targetLanguage: realtimeSessions.targetLanguage,
       endedAt: realtimeSessions.endedAt,
-      transcriptId: transcripts.id
+      endReason: realtimeSessions.endReason,
+      saveStatus: realtimeSessions.saveStatus,
+      checkpointAt: realtimeSessions.checkpointAt,
+      transcriptId: transcripts.id,
+      recordStatus: transcripts.recordStatus
     }).from(realtimeSessions).leftJoin(transcripts, eq(transcripts.sessionId, realtimeSessions.id)).where(and(eq(realtimeSessions.id, parsed.data), eq(realtimeSessions.userId, userId))).orderBy(desc(transcripts.createdAt)).limit(1);
     if (!session) return reply.code(404).send({ message: '找不到这场翻译。' });
     return {
@@ -99,7 +121,11 @@ export async function realtimeRoutes(app: FastifyInstance) {
         languageB: session.languageB,
         targetLanguage: session.targetLanguage,
         endedAt: session.endedAt ? session.endedAt.toISOString() : null,
-        transcriptId: session.transcriptId
+        endReason: session.endReason,
+        saveStatus: session.saveStatus,
+        savedThrough: session.checkpointAt ? session.checkpointAt.toISOString() : null,
+        transcriptId: session.transcriptId,
+        recordStatus: session.recordStatus
       }
     };
   });
@@ -126,7 +152,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
   app.post('/v1/realtime/sessions/:id/audience', { preHandler: app.authenticate }, async (request, reply) => {
     const userId = (request.user as { sub: string }).sub;
     const { id } = request.params as { id: string };
-    const body = z.object({ includeAudio: z.boolean().default(false), expiresInHours: z.number().int().min(1).max(24 * 30).nullable().optional(), reissue: z.boolean().optional() }).parse(request.body ?? {});
+    const body = z.object({ includeAudio: z.boolean().optional(), keepAfter: z.boolean().optional(), expiresInHours: z.number().int().min(1).max(24 * 30).nullable().optional(), reissue: z.boolean().optional() }).parse(request.body ?? {});
     const [session] = await db.select().from(realtimeSessions).where(and(eq(realtimeSessions.id, id), eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt)));
     if (!session) return reply.code(404).send({ message: '这场翻译已经结束。' });
     const hours = body.expiresInHours && body.expiresInHours > 0 ? body.expiresInHours : 24 * 30;
@@ -134,15 +160,20 @@ export async function realtimeRoutes(app: FastifyInstance) {
     const keep = Boolean(session.audienceTokenHash) && !session.audienceRevokedAt && !body.reissue;
     const minted = keep ? null : newAudienceToken();
     const token = minted?.token ?? session.audienceToken;
+    const includeAudio = body.includeAudio ?? (keep ? session.audienceIncludeAudio : false);
+    const keepAfter = body.keepAfter ?? (keep ? session.audienceKeepAfter : false);
     const [updated] = await db.update(realtimeSessions).set({
       audienceToken: token,
       audienceTokenHash: minted?.tokenHash ?? session.audienceTokenHash,
-      audienceIncludeAudio: body.includeAudio,
+      audienceIncludeAudio: includeAudio,
+      audienceKeepAfter: keepAfter,
+      shareIntent: 'audience',
       audienceExpiresAt: expiresAt,
       audienceRevokedAt: null
-    }).where(eq(realtimeSessions.id, id)).returning({ token: realtimeSessions.audienceToken, includeAudio: realtimeSessions.audienceIncludeAudio, expiresAt: realtimeSessions.audienceExpiresAt });
+    }).where(eq(realtimeSessions.id, id)).returning({ token: realtimeSessions.audienceToken, includeAudio: realtimeSessions.audienceIncludeAudio, expiresAt: realtimeSessions.audienceExpiresAt, keepAfter: realtimeSessions.audienceKeepAfter });
+    await recordEvent({ userId, name: 'audience_sharing_enabled', dedupeKey: `audience_sharing_enabled:${id}:${updated.token ?? 'existing'}`, props: { sessionId: id } });
     if (minted) dropAudience(id);
-    return reply.code(201).send({ audience: { token: updated.token, includeAudio: updated.includeAudio, expiresAt: updated.expiresAt } });
+    return reply.code(201).send({ audience: { token: updated.token, includeAudio: updated.includeAudio, keepAfter: updated.keepAfter, expiresAt: updated.expiresAt } });
   });
 
   app.delete('/v1/realtime/sessions/:id/audience', { preHandler: app.authenticate }, async (request, reply) => {
@@ -153,6 +184,7 @@ export async function realtimeRoutes(app: FastifyInstance) {
     await db.update(realtimeSessions).set({ audienceRevokedAt: new Date() }).where(eq(realtimeSessions.id, id));
     if (session.audienceTokenHash) await revokeAudienceShare(session.audienceTokenHash);
     dropAudience(id);
+    await recordEvent({ userId, name: 'audience_sharing_revoked', dedupeKey: `audience_sharing_revoked:${id}:${Date.now()}`, props: { sessionId: id } });
     return reply.code(204).send();
   });
 
@@ -163,14 +195,49 @@ export async function realtimeRoutes(app: FastifyInstance) {
     await handleRealtimeSocket(socket, token);
   });
 
+  app.post('/v1/realtime/sessions/:id/controls', { preHandler: app.authenticate }, async (request, reply) => {
+    const userId = (request.user as { sub: string }).sub;
+    const { id } = request.params as { id: string };
+    const body = z.object({
+      items: z.array(z.object({
+        type: z.enum(['marker', 'gap']),
+        id: z.string().uuid(),
+        kind: z.enum(['important', 'unclear', 'assignment']).optional(),
+        source: z.enum(['user_pause', 'system_suspend', 'reconnect', 'queue_overflow', 'dropped']).optional(),
+        note: z.string().max(500).nullable().optional(),
+        wallMs: z.number().nullable().optional(),
+        audioMs: z.number().nullable().optional(),
+        wallStartMs: z.number().nullable().optional(),
+        wallEndMs: z.number().nullable().optional(),
+        audioStartMs: z.number().nullable().optional(),
+        audioEndMs: z.number().nullable().optional(),
+        precision: z.enum(['exact', 'estimated', 'unknown']).optional()
+      })).max(40)
+    }).parse(request.body);
+    const [session] = await db.select({ id: realtimeSessions.id, endReason: realtimeSessions.endReason }).from(realtimeSessions).where(and(eq(realtimeSessions.id, id), eq(realtimeSessions.userId, userId)));
+    if (!session || session.endReason === 'purged') return reply.code(404).send({ message: '找不到这场翻译。' });
+    const saved: string[] = [];
+    for (const item of body.items) {
+      if (item.type === 'marker' && item.kind) {
+        const ok = await rememberMarker({ id: item.id, userId, sessionId: id, kind: item.kind, note: item.note, wallMs: item.wallMs, audioMs: item.audioMs });
+        if (ok) saved.push(item.id);
+      }
+      if (item.type === 'gap' && item.source && item.precision) {
+        const gap = { id: item.id, source: item.source, wallStartMs: item.wallStartMs ?? null, wallEndMs: item.wallEndMs ?? null, audioStartMs: item.audioStartMs ?? null, audioEndMs: item.audioEndMs ?? null, precision: item.precision };
+        const ok = await rememberGap(id, gap);
+        if (ok) { noteRoomGap(id, gap); saved.push(item.id); }
+      }
+    }
+    return { saved };
+  });
+
   app.delete('/v1/realtime/sessions/:id', { preHandler: app.authenticate }, async (request, reply) => {
     const userId = (request.user as { sub: string }).sub;
     const { id } = request.params as { id: string };
     const [session] = await db.select().from(realtimeSessions).where(and(eq(realtimeSessions.id, id), eq(realtimeSessions.userId, userId), isNull(realtimeSessions.endedAt)));
     if (session) {
-      await closeActiveSession(id, 'cancelled');
-      const seconds = session.startedAt ? Math.max(0, Math.ceil((Date.now() - session.startedAt.getTime()) / 1000)) : 0;
-      await settleUsage(userId, id, seconds, 'cancelled');
+      const closed = await closeActiveSession(id, 'cancelled');
+      if (!closed) await finalizePersistedSession(id, 'cancelled', { interrupted: true });
     }
     return reply.code(204).send();
   });

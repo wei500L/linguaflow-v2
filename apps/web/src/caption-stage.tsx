@@ -4,7 +4,7 @@ import { MicIcon } from './icons';
 
 export type Segment = { source: string; translation: string; speaker?: string; language?: string; interim?: boolean };
 export type CaptionView = 'both' | 'translation' | 'source';
-export type SessionStatus = 'idle' | 'opening' | 'connecting' | 'running' | 'reconnecting' | 'stopping';
+export type SessionStatus = 'idle' | 'opening' | 'connecting' | 'running' | 'reconnecting' | 'stopping' | 'saving';
 
 export const CAPTION_VIEWS: Array<{ value: CaptionView; label: string }> = [
   { value: 'both', label: '双语' },

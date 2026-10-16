@@ -52,4 +52,5 @@ docker compose up --build
 
 - 本目录与旧的 `live` 项目完全隔离。
 - Soniox API key、数据库密码和生产密钥只通过环境变量提供，不提交到 Git。
-- `apps/api/drizzle` 保存数据库迁移。快照基线是最新一条迁移，不要对着 `0004` 生成。修改 schema 后重新运行 `pnpm --filter @linguaflow/api db:generate`，并确认新 SQL 只包含这次的差异。
+- `apps/api/drizzle` 保存数据库迁移。快照基线是最新一条迁移。修改 schema 后重新运行 `pnpm --filter @linguaflow/api db:generate`，并确认新 SQL 只包含这次的差异。
+- `0012_product_completeness_round.sql` 增加检查点、课程、笔记版本、回收站、反馈和产品事件。它只加列和表。实时恢复按实例心跳判断，当前部署是单进程；心跳仍新鲜的会话不会被另一个进程关掉。

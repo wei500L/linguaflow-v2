@@ -19,11 +19,13 @@ export class ApiError extends Error {
   status: number;
   code?: string;
   sessionId?: string;
-  constructor(message: string, status: number, code?: string, sessionId?: string) {
+  reason?: string;
+  constructor(message: string, status: number, code?: string, sessionId?: string, reason?: string) {
     super(message);
     this.status = status;
     this.code = code;
     this.sessionId = sessionId;
+    this.reason = reason;
   }
 }
 
@@ -70,7 +72,7 @@ export async function apiResponse(path: string, init: RequestInit = {}): Promise
   if (response.status === 401 && !path.startsWith('/v1/auth/')) { clearToken(); window.dispatchEvent(new Event('linguaflow:auth-expired')); }
   if (!response.ok) {
     const payload = await response.json().catch(() => null);
-    throw new ApiError(payload?.message ?? `Request failed (${response.status})`, response.status, payload?.code, payload?.sessionId);
+    throw new ApiError(payload?.message ?? `Request failed (${response.status})`, response.status, payload?.code, payload?.sessionId, payload?.reason);
   }
   return response;
 }

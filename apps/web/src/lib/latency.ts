@@ -42,6 +42,38 @@ export type LatencyReadout = {
   translation: number | null;
 };
 
+export type LatencySamples = { recognition: number[]; translation: number[] };
+
+export function emptyLatencySamples(): LatencySamples {
+  return { recognition: [], translation: [] };
+}
+
+function samplePercentile(values: number[], ratio: number) {
+  if (!values.length) return null;
+  const sorted = [...values].sort((left, right) => left - right);
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil(ratio * sorted.length) - 1));
+  return Math.round(sorted[index] ?? 0);
+}
+
+/** One session's own percentiles. The admin view labels this as per-session, not a pooled sample. */
+export function latencySampleProps(samples: LatencySamples) {
+  if (!samples.recognition.length && !samples.translation.length) return null;
+  return {
+    samples: Math.max(samples.recognition.length, samples.translation.length),
+    recognitionP50: samplePercentile(samples.recognition, 0.5),
+    recognitionP95: samplePercentile(samples.recognition, 0.95),
+    translationP50: samplePercentile(samples.translation, 0.5),
+    translationP95: samplePercentile(samples.translation, 0.95)
+  };
+}
+
+export function pushLatencySample(samples: LatencySamples, readout: LatencyReadout) {
+  if (readout.recognition != null && Number.isFinite(readout.recognition)) samples.recognition.push(readout.recognition);
+  if (readout.translation != null && Number.isFinite(readout.translation)) samples.translation.push(readout.translation);
+  if (samples.recognition.length > 240) samples.recognition.splice(0, samples.recognition.length - 240);
+  if (samples.translation.length > 240) samples.translation.splice(0, samples.translation.length - 240);
+}
+
 type LatencyToken = { text?: string; end_ms?: number; is_final?: boolean; translation_status?: string };
 
 function createTrack(): LatencyTrack {

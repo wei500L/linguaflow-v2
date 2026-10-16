@@ -33,11 +33,14 @@ export type TranscriptToken = {
 };
 
 export type RealtimeEvent =
-  | { type: 'ready'; sessionId: string; allowedSeconds?: number; receivedAudioMs?: number }
+  | { type: 'ready'; sessionId: string; allowedSeconds?: number; receivedAudioMs?: number; startedAtMs?: number }
   | { type: 'transcript'; tokens: TranscriptToken[]; totalAudioProcMs?: number }
   | { type: 'snapshot'; tokens: TranscriptToken[]; speakerNames?: Record<string, string> }
   | { type: 'error'; code: string; message?: string }
-  | { type: 'finished'; reason?: string; transcriptId?: string | null };
+  | { type: 'save_status'; status: 'saved' | 'failed'; savedThrough: string | null; checkpointSeq: number }
+  | { type: 'marker_ack'; id: string; ok: boolean }
+  | { type: 'gap_ack'; id: string; ok: boolean }
+  | { type: 'finished'; reason?: string; transcriptId?: string | null; outcome?: 'saved' | 'empty' | 'partial' | 'failed' | 'in_progress' };
 
 const sentenceBoundary = /(?<=[。！？!?．.…])\s*/;
 const sentenceEnding = /[。！？!?．.…]$/;
@@ -360,3 +363,5 @@ export function extractActionItems(markdown: string) {
   }
   return items;
 }
+
+export * from './product.js';

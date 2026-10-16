@@ -4,7 +4,7 @@ import { api } from './lib/api';
 import { tr } from './lib/i18n';
 import { CloseIcon, QrIcon } from './icons';
 
-type Audience = { token: string | null; includeAudio: boolean; expiresAt: string | null };
+type Audience = { token: string | null; includeAudio: boolean; keepAfter?: boolean; expiresAt: string | null };
 type SessionMode = 'one_way' | 'two_way';
 
 const classStarted = new Set<string>();
@@ -30,6 +30,7 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
   const [audience, setAudience] = useState<Audience | null>(null);
   const [viewerCount, setViewerCount] = useState(0);
   const [includeAudio, setIncludeAudio] = useState(false);
+  const [keepAfter, setKeepAfter] = useState(false);
   const [hours, setHours] = useState('168');
   const [qr, setQr] = useState('');
   const [notice, setNotice] = useState('');
@@ -47,7 +48,7 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
     const ticket = ++generation.current;
     setBusy(true); setError(''); setNotice('');
     try {
-      const result = await api<{ audience: Audience }>(`/v1/realtime/sessions/${sessionId}/audience`, { method: 'POST', body: JSON.stringify({ includeAudio: include, expiresInHours, reissue }) });
+      const result = await api<{ audience: Audience & { keepAfter?: boolean } }>(`/v1/realtime/sessions/${sessionId}/audience`, { method: 'POST', body: JSON.stringify({ includeAudio: include, keepAfter, expiresInHours, reissue }) });
       if (automatic && isRevoked(sessionId)) {
         await api(`/v1/realtime/sessions/${sessionId}/audience`, { method: 'DELETE' }).catch(() => undefined);
         if (ticket === generation.current) setAudience(null);
@@ -95,22 +96,15 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
       });
       if (result.audience?.token && syncedToken.current !== result.audience.token) {
         syncedToken.current = result.audience.token;
+      }
+      if (result.audience) {
         setIncludeAudio(result.audience.includeAudio);
+        setKeepAfter(Boolean(result.audience.keepAfter));
       }
       if (!result.audience) syncedToken.current = '';
       if (bootstrapped.current === sessionId) return;
       bootstrapped.current = sessionId;
-      if (!classroom || isRevoked(sessionId) || classDismissed.has(sessionId)) return;
-      if (result.audience && !classStarted.has(sessionId)) {
-        classStarted.add(sessionId);
-        if (result.audience.token) setOpen(true);
-        return;
-      }
-      if (!classStarted.has(sessionId)) {
-        classStarted.add(sessionId);
-        void publishRef.current(false, 168, false, true);
-      }
-      setOpen(true);
+      if (result.audience?.token && !isRevoked(sessionId)) setOpen(false);
     }
     void load().catch(() => undefined);
     const timer = window.setInterval(() => { void load().catch(() => undefined); }, 3000);
@@ -182,13 +176,15 @@ export function AudienceLink({ sessionId, mode, compact = false }: { sessionId: 
           <p className="audience-lead">{tr('再次展示会生成新的听众链接。旧链接会失效。')}</p>
           <button type="button" className="primary-button" onClick={() => { if (!window.confirm(tr('重新签发会让已经打开的链接失效。'))) return; void publish(includeAudio, Number(hours) > 0 ? Number(hours) : 24 * 30, true, false, true); }} disabled={busy}>{busy ? tr('生成中…') : tr('重新签发并复制')}</button>
         </> : <>
-          <h2>{classroom ? tr('生成一张学生能扫的二维码') : tr('听众链接')}</h2>
-          <p className="audience-lead">{classroom ? tr('学生打开后只看字幕。你结束翻译后，这条链接会变成这场记录。') : tr('听众可以看到实时字幕。结束后，这条链接会变成这场记录的分享。')}</p>
+          <h2>{tr('为听众提供字幕')}</h2>
+          <p className="audience-lead">{tr('这会生成听众链接。课后继续开放记录和包含录音都默认关闭。关掉这个面板只是收起二维码，不会停止分享。')}</p>
           <button type="button" className="primary-button" onClick={() => void create()} disabled={busy}>{busy ? tr('生成中…') : classroom ? tr('生成二维码') : tr('创建听众链接')}</button>
         </>}
         <details className="audience-more">
           <summary>{tr('更多')}</summary>
-          <label className="record-toggle"><input type="checkbox" checked={includeAudio} onChange={(event) => setIncludeAudio(event.target.checked)} /><span>{tr('结束后包含录音')}</span></label>
+          <label className="record-toggle"><input type="checkbox" checked={keepAfter} onChange={(event) => setKeepAfter(event.target.checked)} /><span>{tr('结束后继续开放记录')}</span></label>
+          <label className="record-toggle"><input type="checkbox" checked={includeAudio} onChange={(event) => setIncludeAudio(event.target.checked)} /><span>{tr('包含录音')}</span></label>
+          <p className="audience-lead">{tr('关闭面板不会撤销链接。只有「撤销听众链接」会停止访问。')}</p>
           <label className="audio-source">{tr('分享有效期')}<select value={hours} onChange={(event) => setHours(event.target.value)}><option value="24">{tr('24 小时')}</option><option value="72">{tr('3 天')}</option><option value="168">{tr('7 天')}</option><option value="720">{tr('30 天')}</option></select></label>
           {audience && <button type="button" className="secondary-button" onClick={() => void create()} disabled={busy}>{tr('保存这些设置')}</button>}
           {audience?.token && <button type="button" className="audience-text danger" onClick={() => { if (!window.confirm(tr('重新签发会让已经打开的链接失效。'))) return; void publish(includeAudio, Number(hours) > 0 ? Number(hours) : 24 * 30, true, false, true); }} disabled={busy}>{tr('重新签发')}</button>}

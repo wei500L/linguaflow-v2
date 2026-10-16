@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 import { db } from '../db/index.js';
-import { realtimeSessions, transcriptShares } from '../db/schema.js';
+import { realtimeSessions, transcriptShares, transcripts } from '../db/schema.js';
 import { hashShareToken } from './shares.js';
 
 export type AudienceRow = {
@@ -10,6 +10,7 @@ export type AudienceRow = {
   audienceIncludeAudio: boolean;
   audienceRevokedAt: Date | null;
   audienceExpiresAt: Date | null;
+  audienceKeepAfter?: boolean;
 };
 
 export type AudienceRoom = 'live' | 'saving' | null;
@@ -35,7 +36,7 @@ export function audienceIsOpen(row: AudienceRow, now = new Date()) {
    the session and is only returned to that host. Listeners still join by hash. */
 export function audienceReveal(row: AudienceRow) {
   if (!audienceIsOpen(row)) return null;
-  return { token: row.audienceToken, includeAudio: row.audienceIncludeAudio, expiresAt: row.audienceExpiresAt };
+  return { token: row.audienceToken, includeAudio: row.audienceIncludeAudio, keepAfter: Boolean(row.audienceKeepAfter), expiresAt: row.audienceExpiresAt };
 }
 
 export function newAudienceToken() {
@@ -50,7 +51,9 @@ export async function findAudienceSession(token: string) {
 }
 
 export async function ensureAudienceShare(session: AudienceRow, transcriptId: string) {
-  if (!audienceIsOpen(session) || !session.audienceTokenHash) return null;
+  if (!session.audienceKeepAfter || !audienceIsOpen(session) || !session.audienceTokenHash) return null;
+  const [transcript] = await db.select({ id: transcripts.id, deletedAt: transcripts.deletedAt, recordStatus: transcripts.recordStatus }).from(transcripts).where(and(eq(transcripts.id, transcriptId), isNull(transcripts.deletedAt)));
+  if (!transcript || transcript.recordStatus !== 'complete') return null;
   const [existing] = await db.select().from(transcriptShares).where(eq(transcriptShares.tokenHash, session.audienceTokenHash)).limit(1);
   if (existing) return existing;
   await db.insert(transcriptShares).values({

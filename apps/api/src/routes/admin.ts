@@ -1,13 +1,16 @@
 import crypto from 'node:crypto';
 import type { FastifyInstance } from 'fastify';
-import { and, desc, eq, inArray, isNull, or, sql as query } from 'drizzle-orm';
+import { and, desc, eq, gte, inArray, isNull, lt, or, sql as query } from 'drizzle-orm';
 import { z } from 'zod';
 import { db } from '../db/index.js';
-import { activationCodes, adminAudit, deviceClaims, entitlements, realtimeSessions, usageLedger, userDevices, users } from '../db/schema.js';
+import { activationCodes, adminAudit, deviceClaims, entitlements, productEvents, realtimeSessions, usageLedger, userDevices, users } from '../db/schema.js';
 import { claimKeys, fingerprintKey } from '../lib/device.js';
 import { blockFingerprint, releaseFingerprint } from '../lib/device-store.js';
 import { approveReferral, listAdminReferrals, rejectReferral } from '../lib/referral.js';
 import { closeActiveSession } from '../realtime/proxy.js';
+import { finalizePersistedSession } from '../realtime/persist.js';
+import { summarizeProductMetrics } from '@linguaflow/shared';
+import { adminSupportRoutes } from './support.js';
 
 const hashCode = (code: string) => crypto.createHash('sha256').update(code).digest('hex');
 const makeCode = () => `LF-${crypto.randomBytes(4).toString('hex').toUpperCase()}-${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
@@ -230,9 +233,20 @@ export async function adminRoutes(app: FastifyInstance) {
   app.post('/v1/admin/realtime-sessions/:id/terminate', async (request, reply) => {
     const adminId = (request.user as { sub: string }).sub;
     const { id } = request.params as { id: string };
-    await closeActiveSession(id, 'admin_terminated');
-    await db.update(realtimeSessions).set({ endedAt: new Date(), endReason: 'admin_terminated', status: 'cancelled' }).where(eq(realtimeSessions.id, id));
+    const closed = await closeActiveSession(id, 'admin_terminated');
+    if (!closed) await finalizePersistedSession(id, 'admin_terminated', { interrupted: true });
     await db.insert(adminAudit).values({ adminId, action: 'realtime_session_terminated', payloadJson: { sessionId: id } });
     return reply.code(204).send();
   });
+
+  app.get('/v1/admin/metrics', async (request) => {
+    const queryParams = z.object({ from: z.string().optional(), to: z.string().optional() }).parse(request.query);
+    const to = queryParams.to ? new Date(queryParams.to) : new Date();
+    const from = queryParams.from ? new Date(queryParams.from) : new Date(to.getTime() - 7 * 24 * 60 * 60 * 1000);
+    if (Number.isNaN(from.getTime()) || Number.isNaN(to.getTime())) return { empty: true, counts: {}, rates: {}, latency: { samples: 0, sessions: 0, recognitionP50: null, recognitionP95: null, translationP50: null, translationP95: null } };
+    const rows = await db.select().from(productEvents).where(and(gte(productEvents.createdAt, from), lt(productEvents.createdAt, to))).limit(5000);
+    return summarizeProductMetrics(rows.map((row) => ({ name: row.name, createdAtMs: row.createdAt.getTime(), userId: row.userId, props: row.props ?? {} })), from.getTime(), to.getTime(), { truncated: rows.length >= 5000 });
+  });
+
+  await adminSupportRoutes(app);
 }

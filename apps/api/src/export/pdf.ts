@@ -1,7 +1,15 @@
 import { existsSync } from 'node:fs';
 import PDFDocument from 'pdfkit';
+import { renderMathPlain } from '@linguaflow/shared';
 import { config } from '../config.js';
 import { buildMeetingMarkdown, type MeetingDocument } from './meeting.js';
+
+function readableMath(markdown: string) {
+  return markdown.replace(/\$\$([\s\S]*?)\$\$|\$([^$\n]+)\$/g, (_whole, block: string | undefined, inline: string | undefined) => {
+    const rendered = renderMathPlain((block ?? inline ?? '').trim());
+    return rendered.ok ? rendered.text : `${rendered.text}（公式未完整排版）`;
+  });
+}
 
 export function resolvePdfFont() {
   const candidates = [config.pdfFontPath, '/usr/share/fonts/linguaflow/NotoSansCJKsc-Regular.otf'].filter(Boolean);
@@ -17,7 +25,7 @@ export function renderMeetingPdf(doc: MeetingDocument, fontPath: string, scope: 
     pdf.on('error', reject);
   });
   pdf.font(fontPath);
-  const markdown = buildMeetingMarkdown(doc, scope);
+  const markdown = readableMath(buildMeetingMarkdown(doc, scope));
   for (const line of markdown.split('\n')) {
     const heading = /^(#{1,3})\s+(.*)$/.exec(line);
     if (!line.trim()) { pdf.moveDown(0.35); continue; }

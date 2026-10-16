@@ -1,0 +1,779 @@
+[
+  {
+    "label": "held-before-kill",
+    "modelCalls": 0,
+    "settledSeconds": 0,
+    "heldSeconds": 60,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "running",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": null,
+        "output_saved": false
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "held",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "running",
+        "summary_markdown": null,
+        "summary_source_hash": null
+      }
+    ],
+    "tasks": [],
+    "transcriptId": "3a5b0b7b-051f-4762-b39c-475b14c34abb"
+  },
+  {
+    "label": "held-replayed",
+    "modelCalls": 1,
+    "settledSeconds": 60,
+    "heldSeconds": 0,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "output_saved": true
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "summary_source_hash": "f8c8d8d4"
+      }
+    ],
+    "tasks": [
+      {
+        "transcript_id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "text": "待办1",
+        "done": false
+      }
+    ],
+    "replay": {
+      "quote": {
+        "provider": "platform",
+        "template": "classroom",
+        "seconds": 60,
+        "remainingAfter": 35939,
+        "inputHash": "f8c8d8d4",
+        "inputVersion": 0,
+        "edited": false,
+        "notice": null
+      },
+      "start": {
+        "status": "running",
+        "duplicate": false
+      }
+    }
+  },
+  {
+    "label": "output-persisted-before-kill",
+    "modelCalls": 1,
+    "settledSeconds": 60,
+    "heldSeconds": 60,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "output_saved": true
+      },
+      {
+        "id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "running",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "output_saved": true
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "held",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "running",
+        "summary_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "summary_source_hash": "f8c8d8d4"
+      }
+    ],
+    "tasks": [
+      {
+        "transcript_id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "text": "待办1",
+        "done": false
+      }
+    ]
+  },
+  {
+    "label": "task-repair-still-failing",
+    "modelCalls": 0,
+    "settledSeconds": 60,
+    "heldSeconds": 60,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "output_saved": true
+      },
+      {
+        "id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "running",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "output_saved": true
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "held",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "running",
+        "summary_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "summary_source_hash": "f8c8d8d4"
+      }
+    ],
+    "tasks": [
+      {
+        "transcript_id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "text": "待办1",
+        "done": false
+      }
+    ]
+  },
+  {
+    "label": "task-repair-recovered",
+    "modelCalls": 0,
+    "settledSeconds": 120,
+    "heldSeconds": 0,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "output_saved": true
+      },
+      {
+        "id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "output_saved": true
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "summary_source_hash": "f8c8d8d4"
+      }
+    ],
+    "tasks": [
+      {
+        "transcript_id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "text": "待办2",
+        "done": false
+      }
+    ]
+  },
+  {
+    "label": "note-a-ready",
+    "modelCalls": 1,
+    "settledSeconds": 180,
+    "heldSeconds": 0,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "output_saved": true
+      },
+      {
+        "id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "output_saved": true
+      },
+      {
+        "id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "ready",
+        "input_hash": "fe8d04d8",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 3 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办3",
+        "output_saved": true
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "summary_source_hash": "f8c8d8d4"
+      },
+      {
+        "id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 3 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办3",
+        "summary_source_hash": "fe8d04d8"
+      }
+    ],
+    "tasks": [
+      {
+        "transcript_id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "text": "待办2",
+        "done": false
+      },
+      {
+        "transcript_id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "text": "待办3",
+        "done": false
+      }
+    ]
+  },
+  {
+    "label": "before-commit-kill",
+    "modelCalls": 1,
+    "settledSeconds": 180,
+    "heldSeconds": 60,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "output_saved": true
+      },
+      {
+        "id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "output_saved": true
+      },
+      {
+        "id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "ready",
+        "input_hash": "fe8d04d8",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 3 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办3",
+        "output_saved": true
+      },
+      {
+        "id": "70e3b965-3d2f-452a-8d05-7422bf9c08f2",
+        "status": "running",
+        "input_hash": "fe8d04d8",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 4 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办4",
+        "output_saved": true
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "70e3b965-3d2f-452a-8d05-7422bf9c08f2",
+        "status": "held",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "summary_source_hash": "f8c8d8d4"
+      },
+      {
+        "id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "summary_status": "running",
+        "summary_markdown": "## 课程主题\n版本 3 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办3",
+        "summary_source_hash": "fe8d04d8"
+      }
+    ],
+    "tasks": [
+      {
+        "transcript_id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "text": "待办2",
+        "done": false
+      },
+      {
+        "transcript_id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "text": "待办3",
+        "done": false
+      }
+    ]
+  },
+  {
+    "label": "note-b-recovered",
+    "modelCalls": 0,
+    "settledSeconds": 240,
+    "heldSeconds": 0,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "output_saved": true
+      },
+      {
+        "id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "output_saved": true
+      },
+      {
+        "id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "ready",
+        "input_hash": "fe8d04d8",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 3 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办3",
+        "output_saved": true
+      },
+      {
+        "id": "70e3b965-3d2f-452a-8d05-7422bf9c08f2",
+        "status": "ready",
+        "input_hash": "fe8d04d8",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 4 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办4",
+        "output_saved": true
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "70e3b965-3d2f-452a-8d05-7422bf9c08f2",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "summary_source_hash": "f8c8d8d4"
+      },
+      {
+        "id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 4 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办4",
+        "summary_source_hash": "fe8d04d8"
+      }
+    ],
+    "tasks": [
+      {
+        "transcript_id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "text": "待办2",
+        "done": false
+      },
+      {
+        "transcript_id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "text": "待办4",
+        "done": false
+      }
+    ],
+    "replay": {
+      "quote": {
+        "provider": "platform",
+        "template": "classroom",
+        "seconds": 60,
+        "remainingAfter": 35698,
+        "inputHash": "fe8d04d8",
+        "inputVersion": 0,
+        "edited": false,
+        "notice": null
+      },
+      "start": {
+        "status": "ready",
+        "duplicate": true
+      }
+    }
+  },
+  {
+    "label": "after-commit-before-client",
+    "modelCalls": 1,
+    "settledSeconds": 300,
+    "heldSeconds": 0,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "output_saved": true
+      },
+      {
+        "id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "output_saved": true
+      },
+      {
+        "id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "ready",
+        "input_hash": "fe8d04d8",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 3 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办3",
+        "output_saved": true
+      },
+      {
+        "id": "70e3b965-3d2f-452a-8d05-7422bf9c08f2",
+        "status": "ready",
+        "input_hash": "fe8d04d8",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 4 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办4",
+        "output_saved": true
+      },
+      {
+        "id": "73e8dbb3-f62b-4a03-930e-2be232b7e074",
+        "status": "ready",
+        "input_hash": "ba3307e0",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 5 [[seg:3471cead-aaf4-4867-94cb-cbd5346a2c66]]\n\n## 待办事项\n- 待办5",
+        "output_saved": true
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "70e3b965-3d2f-452a-8d05-7422bf9c08f2",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "73e8dbb3-f62b-4a03-930e-2be232b7e074",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "summary_source_hash": "f8c8d8d4"
+      },
+      {
+        "id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 4 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办4",
+        "summary_source_hash": "fe8d04d8"
+      },
+      {
+        "id": "702700cb-acc5-42af-ab11-eb702412a86b",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 5 [[seg:3471cead-aaf4-4867-94cb-cbd5346a2c66]]\n\n## 待办事项\n- 待办5",
+        "summary_source_hash": "ba3307e0"
+      }
+    ],
+    "tasks": [
+      {
+        "transcript_id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "text": "待办2",
+        "done": false
+      },
+      {
+        "transcript_id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "text": "待办4",
+        "done": false
+      },
+      {
+        "transcript_id": "702700cb-acc5-42af-ab11-eb702412a86b",
+        "text": "待办5",
+        "done": false
+      }
+    ],
+    "transcriptId": "702700cb-acc5-42af-ab11-eb702412a86b"
+  },
+  {
+    "label": "after-commit-replay",
+    "modelCalls": 0,
+    "settledSeconds": 300,
+    "heldSeconds": 0,
+    "requests": [
+      {
+        "id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 1 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办1",
+        "output_saved": true
+      },
+      {
+        "id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "ready",
+        "input_hash": "f8c8d8d4",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "output_saved": true
+      },
+      {
+        "id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "ready",
+        "input_hash": "fe8d04d8",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 3 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办3",
+        "output_saved": true
+      },
+      {
+        "id": "70e3b965-3d2f-452a-8d05-7422bf9c08f2",
+        "status": "ready",
+        "input_hash": "fe8d04d8",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 4 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办4",
+        "output_saved": true
+      },
+      {
+        "id": "73e8dbb3-f62b-4a03-930e-2be232b7e074",
+        "status": "ready",
+        "input_hash": "ba3307e0",
+        "quote_seconds": 60,
+        "output_markdown": "## 课程主题\n版本 5 [[seg:3471cead-aaf4-4867-94cb-cbd5346a2c66]]\n\n## 待办事项\n- 待办5",
+        "output_saved": true
+      }
+    ],
+    "ledger": [
+      {
+        "request_id": "8f9ac11d-86b3-415c-889c-0755b09706d6",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "89e5c01b-d6e2-4a1c-bb8d-a82cc61ac850",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "c3c2fd08-6711-4e11-9dca-d04063961c6c",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "70e3b965-3d2f-452a-8d05-7422bf9c08f2",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      },
+      {
+        "request_id": "73e8dbb3-f62b-4a03-930e-2be232b7e074",
+        "status": "settled",
+        "seconds": 60,
+        "source": "plan"
+      }
+    ],
+    "notes": [
+      {
+        "id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 2 [[seg:d819c497-33f0-411f-b484-26acafd6eab4]]\n\n## 待办事项\n- 待办2",
+        "summary_source_hash": "f8c8d8d4"
+      },
+      {
+        "id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 4 [[seg:d4b55d88-4f14-4777-ab95-9ca8dc625240]]\n\n## 待办事项\n- 待办4",
+        "summary_source_hash": "fe8d04d8"
+      },
+      {
+        "id": "702700cb-acc5-42af-ab11-eb702412a86b",
+        "summary_status": "ready",
+        "summary_markdown": "## 课程主题\n版本 5 [[seg:3471cead-aaf4-4867-94cb-cbd5346a2c66]]\n\n## 待办事项\n- 待办5",
+        "summary_source_hash": "ba3307e0"
+      }
+    ],
+    "tasks": [
+      {
+        "transcript_id": "3a5b0b7b-051f-4762-b39c-475b14c34abb",
+        "text": "待办2",
+        "done": false
+      },
+      {
+        "transcript_id": "4e7db42c-2dec-4082-a5f1-fc994d56f9f6",
+        "text": "待办4",
+        "done": false
+      },
+      {
+        "transcript_id": "702700cb-acc5-42af-ab11-eb702412a86b",
+        "text": "待办5",
+        "done": false
+      }
+    ],
+    "replay": {
+      "quote": {
+        "provider": "platform",
+        "template": "classroom",
+        "seconds": 60,
+        "remainingAfter": 35637,
+        "inputHash": "ba3307e0",
+        "inputVersion": 0,
+        "edited": false,
+        "notice": null
+      },
+      "start": {
+        "status": "ready",
+        "duplicate": true
+      }
+    }
+  }
+]
